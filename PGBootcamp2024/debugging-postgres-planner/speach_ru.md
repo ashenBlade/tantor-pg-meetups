@@ -235,7 +235,7 @@ TODO: схема OpExpr->Var->Const
 
 ```c
 static bool
-extract_const_compare_expression(OpExpr *expr, Var **out_var, Const **out_const)
+extract_operator_const_comp_expression(OpExpr *expr, Var **out_var, Const **out_const)
 {
     List *args = expr->args;
     /* Check exactly 2 operands */
@@ -282,11 +282,11 @@ is_mutually_exclusive(OpExpr *left, OpExpr *right)
     Const *right_const;
 
     /* Extract operands */
-    if (!extract_const_compare_expression(left, &left_var, &left_const))
+    if (!extract_operator_const_comp_expression(left, &left_var, &left_const))
     {
         return false;
     }
-    if (!extract_const_compare_expression(right, &right_var, &right_const))
+    if (!extract_operator_const_comp_expression(right, &right_var, &right_const))
     {
         return false;
     }
@@ -361,12 +361,49 @@ simplify_and_arguments(List *args,
 }
 ```
 
-Если мы пропустим запрос через `EXPLAIN`, то получим желаемое - узел сканирования
-таблицы заменился узлом пустого результата.
+Проверим результат. Представим, что у нас имеется подобная схема:
 
-TODO: код или что-то для вывода
+```sql
+CREATE TABLE tbl(id INTEGER GENERATED ALWAYS AS IDENTITY, value INTEGER);
+```
 
-Но у этого подхода есть недостаток - он учитывает только `WHERE` условия. Такой
+И тестовый запрос:
+
+```sql
+EXPLAIN ANALYZE SELECT id FROM tbl WHERE value > 0 AND value <= 0;
+```
+
+Для начала запустим запрос без наших изменений:
+
+```text
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Seq Scan on tbl  (cost=0.00..43.90 rows=11 width=4) (actual time=0.004..0.004 rows=0 loops=1)
+   Filter: ((value > 0) AND (value <= 0))
+ Planning Time: 0.186 ms
+ Execution Time: 0.015 ms
+(4 rows)
+```
+
+Видно, что мы действительно выполнили сканирование таблицы с примененным фильтром.
+Теперь соберем вместе с нашими изменениями и запустим этот запрос:
+
+```text
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.001..0.002 rows=0 loops=1)
+   One-Time Filter: false
+ Planning Time: 0.033 ms
+ Execution Time: 0.013 ms
+(4 rows)
+```
+
+По выводу видно, что весь запрос заменен пустым выводом:
+
+- `Result` - узел возвращающий готовые значения
+- `One-Time Filter: false` - единовременный фильтр, отклоняющий все записи
+
+Но у этого подхода есть недостаток - он учитывает условия только в `WHERE`. Такой
 запрос оптимизирован не будет:
 
 ```sql
@@ -380,13 +417,213 @@ SELECT id FROM tbl t1 JOIN tbl t2 ON t1.value > 0 WHERE t1.value <= 0;
 Можно сказать, что работа планировщика начинается в `query_planner`, так как
 там инициализируются поля `PlannerInfo`, необходимые для работы планировщика.
 Нас интересует `simple_rel_array` - массив, который хранит в себе `RelOptInfo`.
-Напомню, что `RelOptInfo` - это структура, представляющая информацию о таблице или
-о `JOIN`'е. Все что нам нужно - пройтись по этому массиву и слить 2 таких условия
-в один `FALSE`.
+Напомню, что `RelOptInfo` - это структура, представляющая информацию о таблице
+или о `JOIN`'е. Все что нам нужно - пройтись по этому массиву и слить 2 таких
+условия в один `FALSE`.
 
+В `RelOptInfo` нам нужно работать с полем `baserestrictinfo` - список из
+ограничений, наложенных на таблицу. Теперь нам необходимо пройтись по этому
+массиву и удалить конфликтующие условия.
 
+```c
+void clamp_range_qualifiers(PlannerInfo *root)
+{
+    for (int i = 1; i < root->simple_rel_array_size; i++)
+    {
+        RelOptInfo *rel = root->simple_rel_array[i];
+        if (rel == NULL || rel->rtekind != RTE_RELATION)
+        {
+            continue;
+        }
+
+        clamp_range_qualifier_for_rel(root, rel);
+    }
+}
+
+static void
+clamp_range_qualifier_for_rel(PlannerInfo *root, RelOptInfo *rel)
+{
+    ListCell *lc;
+    List *new_baserestrictinfo;
+    RestrictInfo *prev_rinfo;
+    Index new_min_security;
+
+    if (list_length(rel->baserestrictinfo) < 2)
+    {
+        return;
+    }
+
+    new_baserestrictinfo = NIL;
+    prev_rinfo = NULL;
+    new_min_security = rel->baserestrict_min_security;
+
+    foreach (lc, rel->baserestrictinfo)
+    {
+        RestrictInfo *cur_rinfo = (RestrictInfo *)lfirst(lc);
+        if (prev_rinfo == NULL)
+        {
+            prev_rinfo = cur_rinfo;
+            continue;
+        }
+
+        if (IsA(prev_rinfo->clause, OpExpr) && IsA(cur_rinfo->clause, OpExpr) &&
+            is_exclusive_range((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
+        {
+            RestrictInfo *false_rinfo = create_restrict_info_from_ops(root, prev_rinfo, cur_rinfo);
+            prev_rinfo = false_rinfo;
+            new_min_security = Min(new_min_security, false_rinfo->security_level);
+        }
+        else
+        {
+            new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
+            prev_rinfo = cur_rinfo;
+        }
+    }
+
+    if (prev_rinfo != NULL)
+    {
+        new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
+    }
+
+    
+    pfree(rel->baserestrictinfo);
+    rel->baserestrictinfo = new_baserestrictinfo;
+    rel->baserestrict_min_security = new_min_security;
+}
+```
+
+Добавим мы эту логику сразу после функции `add_base_rels_to_query`, которая
+создает массив `RelOptInfo`.
+
+Запускаем запрос и получаем следующий вывод:
+
+```text
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Seq Scan on tbl  (cost=0.00..43.90 rows=11 width=4) (actual time=0.007..0.008 rows=0 loops=1)
+   Filter: ((value > 0) AND (value <= 0))
+ Planning Time: 0.042 ms
+ Execution Time: 0.020 ms
+(4 rows)
+```
+
+Наш патч не сработал, планировщик все же решил использовать сканирование таблицы.
+Причина этого следующая - практически все основные структуры как `PlannerInfo`
+или `RelOptInfo` заполняются по мере работы, а не сразу. Мы предположили, что
+раз `add_base_rels_to_query` создает этот массив, то и каждый элемент уже должен
+быть проинициализирован, но это не так. Здесь ничего не остается кроме как
+искать место, где данные будут инициализированы, добавлять `Assert` и писать
+тесты.
+
+В нашем случае, для исправления можно переместить вызов нашей функции вниз до
+`make_one_rel`. Тогда все заработает:
+
+```text
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.001..0.002 rows=0 loops=1)
+   One-Time Filter: false
+ Planning Time: 0.125 ms
+ Execution Time: 0.012 ms
+(4 rows)
+```
+
+Также в поле `baserestrictinfo` содержатся и ограничения связанные с `JOIN`'ами,
+перемещением условий между подзапросами и другими оптимизациями планировщика.
+Например, следующие запросы также дадут ожидаемый результат:
+
+```sql
+SELECT t1.id FROM tbl t1 JOIN tbl t2 ON t1.value > 0 WHERE t1.value <= 0;
+SELECT t1.id FROM tbl t1 JOIN LATERAL (SELECT * FROM tbl t2 WHERE t1.value > 0) t2 ON TRUE WHERE t1.value <= 0;
+SELECT t1.id FROM tbl t1 JOIN lateral (SELECT * FROM tbl JOIN (SELECT * FROM tbl WHERE t1.value > 0) t3 ON TRUE) t2 ON TRUE WHERE t1.value <= 0;
+```
+
+Но вот так удалять данные о запросе не самая лучшая идея, так как мы уменьшаем
+известную нам информацию, а также тратим дополнительные ресурсы на эти операции.
+Поэтому лучшим вариантом будет просто использовать эти знания непосредственно
+при создании путей.
+
+Вот мы и пришли к реализации в самом Postgres. Constraint Exclusion - это одна
+из оптимизаций, которая включается GUC параметром `constraint_exclusion` и
+проводится непосредственно перед вычислением стоимости пути. И там используется
+примерно та же логика, что и наша. Например, вот кусок кода, обнаруживающий
+противоположные операторы:
+
+```c
+static bool
+operator_predicate_proof(Expr *predicate, Node *clause,
+                         bool refute_it, bool weak)
+{
+    OpExpr *pred_opexpr,
+           *clause_opexpr;
+    Oid pred_collation,
+        clause_collation;
+    Oid pred_op,
+        clause_op,
+        test_op;
+    Node *pred_leftop,
+         *pred_rightop,
+         *clause_leftop,
+         *clause_rightop;
+
+    /*
+     * Both expressions must be binary opclauses, else we can't do anything.
+     *
+     * Note: in future we might extend this logic to other operator-based
+     * constructs such as DistinctExpr.  But the planner isn't very smart
+     * about DistinctExpr in general, and this probably isn't the first place
+     * to fix if you want to improve that.
+     */
+    if (!is_opclause(predicate))
+        return false;
+    pred_opexpr = (OpExpr *) predicate;
+    if (list_length(pred_opexpr->args) != 2)
+        return false;
+    if (!is_opclause(clause))
+        return false;
+    clause_opexpr = (OpExpr *) clause;
+    if (list_length(clause_opexpr->args) != 2)
+        return false;
+
+    /*
+     * If they're marked with different collations then we can't do anything.
+     * This is a cheap test so let's get it out of the way early.
+     */
+    pred_collation = pred_opexpr->inputcollid;
+    clause_collation = clause_opexpr->inputcollid;
+    if (pred_collation != clause_collation)
+        return false;
+
+    /* Grab the operator OIDs now too.  We may commute these below. */
+    pred_op = pred_opexpr->opno;
+    clause_op = clause_opexpr->opno;
+
+    /*
+     * We have to match up at least one pair of input expressions.
+     */
+    pred_leftop = (Node *) linitial(pred_opexpr->args);
+    pred_rightop = (Node *) lsecond(pred_opexpr->args);
+    clause_leftop = (Node *) linitial(clause_opexpr->args);
+    clause_rightop = (Node *) lsecond(clause_opexpr->args);
+
+    if (equal(pred_leftop, clause_leftop))
+    {
+        if (equal(pred_rightop, clause_rightop))
+        {
+            /* We have x op1 y and x op2 y */
+            return get_negator(pred_op) == clause_op;
+        }
+    }
+    /* Omitted */
+}
+```
+
+> Одно из различий в том, что мы не учитывали изменчивость функции. Нам следовало
+> бы отбрасывать все `VOLATILE` операторы. Реальный код так делает.
 
 ### Подводим итоги: что сделали, как сделали (закрепляем материал)
+
+
 
 ## Советы как упростить себе жизнь при отладке
  
