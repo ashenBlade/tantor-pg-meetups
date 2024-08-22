@@ -310,6 +310,82 @@ is_mutually_exclusive(OpExpr *left, OpExpr *right)
 
 ```
 
+Теперь осталось добавить эту логику. Первое место, где можно добавить -
+предобработка дерева запроса.
+
+Первая часть `subquery_planner` - это предобработка дерева запроса с его
+переписыванием. Нас интересует функция `preprocess_expression` - это обобщенная
+функция, которая проходит по узлам и выполняет общую предобработку: вычисление
+константных выражений, приведение к каноническому виду и другие.
+
+Спускаясь ниже мы находим функцию `simplify_and_arguments` - она вызывается из
+`preprocess_expression`, когда ей встречается узел `AND` условия, для проверки
+того, что все выражение можно заменить константным `FALSE`.
+
+Добавим нашу логику следующим образом (часть функции удалена для удобства):
+
+```c
+static List *
+simplify_and_arguments(List *args,
+                       eval_const_expressions_context *context,
+                       bool *haveNull, bool *forceFalse)
+{
+    List *newargs = NIL;
+    List *unprocessed_args;
+
+    while (unprocessed_args)
+    {
+        Node *arg = (Node *) linitial(unprocessed_args);
+
+        /* Omitted */
+
+        if (IsA(arg, Const))
+        {
+            /* Omitted */
+        }
+
+        /* Compare current OpExpr with previous one for self-exclusion constraints */
+        if (IsA(arg, OpExpr) && list_length(newargs) > 0 && IsA(llast(newargs), OpExpr))
+        {
+            if (is_mutually_exclusive((OpExpr *)arg, (OpExpr *)llast(newargs)))
+            {
+                *forceFalse = true;
+                return NIL;
+            }
+        }
+        
+        newargs = lappend(newargs, arg);
+    }
+
+    return newargs;
+}
+```
+
+Если мы пропустим запрос через `EXPLAIN`, то получим желаемое - узел сканирования
+таблицы заменился узлом пустого результата.
+
+TODO: код или что-то для вывода
+
+Но у этого подхода есть недостаток - он учитывает только `WHERE` условия. Такой
+запрос оптимизирован не будет:
+
+```sql
+SELECT id FROM tbl t1 JOIN tbl t2 ON t1.value > 0 WHERE t1.value <= 0;
+```
+
+Это может исправить планировщик, знающий о таких ограничениях. Следующее место,
+куда мы добавим оптимизацию - в сам планировщик, сделаем эту оптимизацию частью
+его работы.
+
+Можно сказать, что работа планировщика начинается в `query_planner`, так как
+там инициализируются поля `PlannerInfo`, необходимые для работы планировщика.
+Нас интересует `simple_rel_array` - массив, который хранит в себе `RelOptInfo`.
+Напомню, что `RelOptInfo` - это структура, представляющая информацию о таблице или
+о `JOIN`'е. Все что нам нужно - пройтись по этому массиву и слить 2 таких условия
+в один `FALSE`.
+
+
+
 ### Подводим итоги: что сделали, как сделали (закрепляем материал)
 
 ## Советы как упростить себе жизнь при отладке
