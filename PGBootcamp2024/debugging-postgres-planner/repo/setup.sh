@@ -1,5 +1,23 @@
 #!/usr/bin/bash
 
+function print_help {
+    cat <<EOM 
+Setup environment for PostgreSQL development
+Usage: $0
+EOM
+}
+
+case "$1" in
+    --help|-h)
+        print_help
+        exit 0
+        ;;
+    *)
+        echo "Unknown option: $1"
+        exit 1
+        ;;
+esac
+
 set -e
 cd "$(dirname ${BASH_SOURCE[0]:-$0})/.."
 

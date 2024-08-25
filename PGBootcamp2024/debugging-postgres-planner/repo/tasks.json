@@ -82,7 +82,7 @@
             "type": "process",
             "command": "${workspaceFolder}/dev/test.sh",
             "args": [
-                "--base"
+                "--regress"
             ],
             "problemMatcher": [],
             "group": {

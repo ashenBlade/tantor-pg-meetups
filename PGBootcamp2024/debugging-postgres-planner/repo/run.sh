@@ -1,8 +1,19 @@
 #!/usr/bin/bash
 
-set -ex
-source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
-source_config_file
+function print_help {
+    cat <<EOM
+Usage: $0 [--init-db] [--run-db] [--psql] [--stop-db]
+
+    --init-db - initialize database files
+    --run-db - run database using initialized database
+    --psql - run psql
+    --stop-db - stop running database
+
+Example: $0 --run-db --psql --stop-db
+EOM
+}
+
+set -e
 
 RUN_DB=""
 RUN_PSQL=""
@@ -24,15 +35,21 @@ while [[ -n "$1" ]]; do
         --stop-db)
             STOP_DB="1"
             ;;
+        --help|-h) 
+            print_help
+            exit 0
+            ;;
         *)
             echo "Unknown argument: $ARG"
+            print_help
             exit 1
             ;;
     esac
     shift
 done
 
-# All env variables already setup for current installation
+source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
+source_config_file
 
 if [[ "$INIT_DB" ]]; then
     initdb -U $PGUSER || true

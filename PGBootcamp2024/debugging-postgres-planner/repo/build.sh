@@ -1,8 +1,17 @@
 #!/usr/bin/bash
 
-set -ex
-source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
-source_config_file
+function print_help {
+    cat <<EOM
+Build PostgreSQL sources
+Usage: $0 [-j N|--jobs=N]
+
+    -j N, --jobs=N      Specify number of threads to use
+
+Example: $0 -j 12
+EOM
+}
+
+set -e
 
 THREADS=""
 while [[ -n "$1" ]]; do
@@ -19,6 +28,8 @@ while [[ -n "$1" ]]; do
     shift
 done
 
+source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
+source_config_file
 
 if [[ -n "$THREADS" ]]; then
     THREADS="-j $THREADS"
