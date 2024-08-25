@@ -1,0 +1,32 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Backend (Attach)",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/src/backend/postgres",
+            "processId": "${input:currentBackendPid}",
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ],
+    "inputs": [
+        {
+            "id": "currentBackendPid",
+            "type": "command",
+            "command": "shellCommand.execute",
+            "args": {
+                "command": "${workspaceFolder}/dev/get_current_backend_pid.sh",
+                "cwd": "${workspaceFolder}",
+                "useFirstResult": true
+            }
+        }
+    ]
+}
