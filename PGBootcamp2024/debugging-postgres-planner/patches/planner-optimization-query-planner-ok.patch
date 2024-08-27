@@ -1,0 +1,289 @@
+diff --git a/src/backend/optimizer/plan/planmain.c b/src/backend/optimizer/plan/planmain.c
+index 7afd434c60..0db4a5b9af 100644
+--- a/src/backend/optimizer/plan/planmain.c
++++ b/src/backend/optimizer/plan/planmain.c
+@@ -272,6 +272,7 @@ query_planner(PlannerInfo *root,
+ 	 */
+ 	distribute_row_identity_vars(root);
+ 
++	clamp_range_qualifiers(root);
+ 	/*
+ 	 * Ready to do the primary planning.
+ 	 */
+diff --git a/src/backend/optimizer/util/clauses.c b/src/backend/optimizer/util/clauses.c
+index 62650995cb..0228611077 100644
+--- a/src/backend/optimizer/util/clauses.c
++++ b/src/backend/optimizer/util/clauses.c
+@@ -40,6 +40,7 @@
+ #include "optimizer/optimizer.h"
+ #include "optimizer/plancat.h"
+ #include "optimizer/planmain.h"
++#include "optimizer/restrictinfo.h"
+ #include "parser/analyze.h"
+ #include "parser/parse_agg.h"
+ #include "parser/parse_coerce.h"
+@@ -5409,3 +5410,149 @@ pull_paramids_walker(Node *node, Bitmapset **context)
+ 	return expression_tree_walker(node, pull_paramids_walker,
+ 								  (void *) context);
+ }
++
++static RestrictInfo *
++create_restrict_info_from_ops(PlannerInfo *root, RestrictInfo *left, RestrictInfo *right)
++{
++	RestrictInfo *rinfo = make_restrictinfo(root,
++											(Expr *) makeBoolConst(false, false),
++											right->is_pushed_down,
++											right->has_clone,
++											right->is_clone,
++											false,
++											0,
++											NULL, NULL, NULL);
++	return rinfo;
++}
++
++static bool
++extract_const_compare_expression(OpExpr *expr, Var **out_var, Const **out_const)
++{
++	List *args = expr->args;
++	if (list_length(args) != 2)
++	{
++		return false;
++	}
++	if (!IsA(linitial(args), Var))
++	{
++		return false;
++	}
++	*out_var = (Var *)linitial(args);
++	if (!IsA(llast(args), Const))
++	{
++		return false;
++	}
++	*out_const = (Const *)llast(args);
++	return true;
++}
++
++static bool
++use_negate_operators(OpExpr *left, OpExpr *right)
++{
++	HeapTuple left_tup, right_tup;
++	Oid left_negator, right_negator;
++	left_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(left->opno));
++	right_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(right->opno));
++	left_negator = ((Form_pg_operator)GETSTRUCT(left_tup))->oprnegate;
++	right_negator = ((Form_pg_operator)GETSTRUCT(right_tup))->oprnegate;
++	ReleaseSysCache(left_tup);
++	ReleaseSysCache(right_tup);
++	return left->opno == right_negator || right->opno == left_negator;
++}
++
++static bool
++is_exclusive_range(OpExpr *left, OpExpr *right)
++{
++	Var *left_var;
++	Const *left_const;
++	Var *right_var;
++	Const *right_const;
++	if (!use_negate_operators(left, right))
++	{
++		return false;
++	}
++	if (!extract_const_compare_expression(left, &left_var, &left_const))
++	{
++		return false;
++	}
++	if (!extract_const_compare_expression(right, &right_var, &right_const))
++	{
++		return false;
++	}
++	if (!(left_var->varno == right_var->varno &&
++		  left_var->varattno == right_var->varattno))
++	{
++		return false;
++	}
++	if (!datumIsEqual(left_const->constvalue, right_const->constvalue,
++					  right_const->constbyval, right_const->constlen))
++	{
++		return false;
++	}
++	return true;
++}
++
++static void
++clamp_range_qualifier_for_rel(PlannerInfo *root, RelOptInfo *rel)
++{
++	ListCell *lc;
++	List *new_baserestrictinfo;
++	RestrictInfo *prev_rinfo;
++	Index new_min_security;
++
++	if (list_length(rel->baserestrictinfo) < 2)
++	{
++		return;
++	}
++
++	new_baserestrictinfo = NIL;
++	prev_rinfo = NULL;
++	new_min_security = rel->baserestrict_min_security;
++
++	foreach (lc, rel->baserestrictinfo)
++	{
++		RestrictInfo *cur_rinfo = (RestrictInfo *)lfirst(lc);
++		if (prev_rinfo == NULL)
++		{
++			prev_rinfo = cur_rinfo;
++			continue;
++		}
++
++		if (IsA(prev_rinfo->clause, OpExpr) && IsA(cur_rinfo->clause, OpExpr) &&
++			is_exclusive_range((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
++		{
++			RestrictInfo *false_rinfo = create_restrict_info_from_ops(root, prev_rinfo, cur_rinfo);
++			prev_rinfo = false_rinfo;
++			new_min_security = Min(new_min_security, false_rinfo->security_level);
++		}
++		else
++		{
++			new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
++			prev_rinfo = cur_rinfo;
++		}
++	}
++
++	if (prev_rinfo != NULL)
++	{
++		new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
++	}
++
++
++	pfree(rel->baserestrictinfo);
++	rel->baserestrictinfo = new_baserestrictinfo;
++	rel->baserestrict_min_security = new_min_security;
++}
++
++void clamp_range_qualifiers(PlannerInfo *root)
++{
++	for (size_t i = 1; i < root->simple_rel_array_size; i++)
++	{
++		RelOptInfo *rel = root->simple_rel_array[i];
++		if (rel == NULL || rel->rtekind != RTE_RELATION)
++		{
++			continue;
++		}
++
++		clamp_range_qualifier_for_rel(root, rel);
++	}
++}
+diff --git a/src/backend/optimizer/util/plancat.c b/src/backend/optimizer/util/plancat.c
+index 1a3045479f..9ca7ce1065 100644
+--- a/src/backend/optimizer/util/plancat.c
++++ b/src/backend/optimizer/util/plancat.c
+@@ -31,6 +31,7 @@
+ #include "catalog/pg_proc.h"
+ #include "catalog/pg_statistic_ext.h"
+ #include "catalog/pg_statistic_ext_data.h"
++#include "catalog/pg_operator.h"
+ #include "foreign/fdwapi.h"
+ #include "miscadmin.h"
+ #include "nodes/makefuncs.h"
+@@ -54,6 +55,7 @@
+ #include "utils/rel.h"
+ #include "utils/snapmgr.h"
+ #include "utils/syscache.h"
++#include "utils/datum.h"
+ 
+ /* GUC parameter */
+ int			constraint_exclusion = CONSTRAINT_EXCLUSION_PARTITION;
+@@ -1533,6 +1535,83 @@ get_relation_statistics(RelOptInfo *rel, Relation relation)
+ 	return stainfos;
+ }
+ 
++static bool extract_const_compare_expression(OpExpr *expr, Var **out_var, Const **out_const)
++{
++	List *args = expr->args;
++	if (list_length(args) != 2)
++	{
++		return false;
++	}
++
++	if (!IsA(linitial(args), Var))
++	{
++		return false;
++	}
++	*out_var = (Var *)linitial(args);
++
++	if (!IsA(llast(args), Const))
++	{
++		return false;
++	}
++	*out_const = (Const *)llast(args);
++
++	return true;
++}
++
++static bool use_negate_operators(OpExpr *left, OpExpr *right)
++{
++	HeapTuple left_tup, right_tup;
++	Oid left_negator, right_negator;
++
++	left_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(left->opno));
++	right_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(right->opno));
++
++	left_negator = ((Form_pg_operator)GETSTRUCT(left_tup))->oprnegate;
++	right_negator = ((Form_pg_operator)GETSTRUCT(right_tup))->oprnegate;
++
++	ReleaseSysCache(left_tup);
++	ReleaseSysCache(right_tup);
++
++	return left->opno == right_negator || right->opno == left_negator;
++}
++
++static bool is_exclusive_range(OpExpr *left, OpExpr *right)
++{
++	Var *left_var;
++	Const *left_const;
++	Var *right_var;
++	Const *right_const;
++
++	if (!use_negate_operators(left, right))
++	{
++		return false;
++	}
++
++	if (!extract_const_compare_expression(left, &left_var, &left_const))
++	{
++		return false;
++	}
++
++	if (!extract_const_compare_expression(right, &right_var, &right_const))
++	{
++		return false;
++	}
++
++	if (!(left_var->varno == right_var->varno &&
++		  left_var->varattno == right_var->varattno))
++	{
++		return false;
++	}
++
++	if (!datumIsEqual(left_const->constvalue, right_const->constvalue,
++					  right_const->constbyval, right_const->constlen))
++	{
++		return false;
++	}
++
++	return true;
++}
++
+ /*
+  * relation_excluded_by_constraints
+  *
+diff --git a/src/include/optimizer/optimizer.h b/src/include/optimizer/optimizer.h
+index e7a557ef7b..df1c858c0c 100644
+--- a/src/include/optimizer/optimizer.h
++++ b/src/include/optimizer/optimizer.h
+@@ -200,5 +200,6 @@ extern bool contain_vars_of_level(Node *node, int levelsup);
+ extern int	locate_var_of_level(Node *node, int levelsup);
+ extern List *pull_var_clause(Node *node, int flags);
+ extern Node *flatten_join_alias_vars(PlannerInfo *root, Query *query, Node *node);
++extern void clamp_range_qualifiers(PlannerInfo *root);
+ 
+ #endif							/* OPTIMIZER_H */
