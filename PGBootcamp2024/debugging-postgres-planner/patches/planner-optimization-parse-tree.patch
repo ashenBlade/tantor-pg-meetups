@@ -58,8 +58,8 @@ index b4e085e9d4..3ab65a3daf 100644
 +		return false;
 +	}
 +
-+	return get_negator(left->opno) == right->opno ||
-+		   left->opno == get_negator(right->opno);
++	return get_negator(left->opno) == right->opno;
++
 +}
 +
  /*

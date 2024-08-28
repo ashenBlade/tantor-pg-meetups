@@ -21,9 +21,7 @@
 Сегодня поговорим именно о 3 этапе – работе планировщика.
 
 Рассмотрим общий вид на то, как работает планировщик.
-Его работу можно поделить на несколько (TODO: конкретное число) этапов:
-
-TODO: вместо предобработка какое-нибудь другое слово
+Его работу также можно поделить на несколько 4 этапа:
 
 1. Предобработка дерева запроса
 2. Оптимизация
@@ -340,9 +338,7 @@ if (!equal(left_const, right_const))
 Для `<` это будет `<=`.
 
 ```c++
-/* Operators are opposite  */
-return get_negator(left->opno) == right->opno || 
-       left->opno == get_negator(right->opno);
+return get_negator(left->opno) == right-opno;
 ```
 
 В результате, функция выглядит таким образом:
@@ -379,8 +375,7 @@ is_mutually_exclusive(OpExpr *left, OpExpr *right)
     }
 
     /* Operators are opposite  */
-    return get_negator(left->opno) == right->opno || 
-           left->opno == get_negator(right->opno);
+    return get_negator(left->opno) == right->opno;
 }
 
 ```
