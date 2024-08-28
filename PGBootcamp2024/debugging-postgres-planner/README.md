@@ -389,11 +389,9 @@ is_mutually_exclusive(OpExpr *left, OpExpr *right)
 выполняет общую предобработку: вычисление константных выражений, приведение к
 каноническому виду и другие.
 
-TODO: добавить вставки с кодом
-
-Спускаясь ниже мы находим функцию `simplify_and_arguments` - она вызывается из
-`preprocess_expression`, когда ей встречается узел `AND` условия, для проверки
-того, что все выражение можно заменить константным `FALSE`.
+Нас интересует `simplify_and_arguments` - она вызывается из `preprocess_expression`,
+когда ей встречается узел `AND` условия, для проверки того, что все выражение
+можно заменить константным `FALSE`.
 
 Добавим нашу логику следующим образом (часть функции удалена для удобства):
 
@@ -487,21 +485,59 @@ SELECT id FROM tbl t1 JOIN tbl t2 ON t1.value > 0 WHERE t1.value <= 0;
 куда мы добавим оптимизацию - в сам планировщик, сделаем эту оптимизацию частью
 его работы.
 
-Можно сказать, что работа планировщика начинается в `query_planner`, так как
-там инициализируются поля `PlannerInfo`, необходимые для работы планировщика.
-Нас интересует `simple_rel_array` - массив, который хранит в себе `RelOptInfo`.
-Напомню, что `RelOptInfo` - это структура, представляющая информацию о таблице
-или о `JOIN`'е. Все что нам нужно - пройтись по этому массиву и слить 2 таких
-условия в один `FALSE`.
+Грубо говоря, работа планировщика начинается в `query_planner`, так как там
+инициализируются поля `PlannerInfo`, необходимые для работы планировщика. Нас
+интересует `simple_rel_array` - массив, который хранит в себе `RelOptInfo`.
+Напомню, что `RelOptInfo` - это структура, представляющая информацию о таблице.
+Все что нам нужно - пройтись по этому массиву и слить 2 таких условия в один
+`FALSE`.
 
 В `RelOptInfo` нам нужно работать с полем `baserestrictinfo` - список из
 ограничений, наложенных на таблицу. Теперь нам необходимо пройтись по этому
 массиву и удалить конфликтующие условия.
 
 ```c
-void clamp_range_qualifiers(PlannerInfo *root)
+static void
+clamp_range_qualifier_for_rel(PlannerInfo *root, RelOptInfo *rel)
 {
-    for (int i = 1; i < root->simple_rel_array_size; i++)
+    ListCell *lc;
+    RestrictInfo *prev_rinfo;
+
+    if (list_length(rel->baserestrictinfo) < 2)
+    {
+        return;
+    }
+
+    prev_rinfo = linitial(rel->baserestrictinfo);
+
+    for_each_from(lc, rel->baserestrictinfo, 1)
+    {
+        RestrictInfo *cur_rinfo = (RestrictInfo *)lfirst(lc);
+        if (IsA(prev_rinfo->clause, OpExpr) && IsA(cur_rinfo->clause, OpExpr) &&
+            is_exclusive_range((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
+        {
+            RestrictInfo *false_rinfo = make_restrictinfo(root,
+                                                          (Expr *)makeBoolConst(false, false),
+                                                          false,
+                                                          false,
+                                                          false,
+                                                          false,
+                                                          0,
+                                                          NULL, NULL, NULL);
+            rel->baserestrictinfo = list_make1(false_rinfo);
+            return;
+        }
+        else
+        {
+            prev_rinfo = cur_rinfo;
+        }
+    }
+}
+
+void 
+clamp_range_qualifiers(PlannerInfo *root)
+{
+    for (size_t i = 1; i < root->simple_rel_array_size; i++)
     {
         RelOptInfo *rel = root->simple_rel_array[i];
         if (rel == NULL || rel->rtekind != RTE_RELATION)
@@ -513,56 +549,6 @@ void clamp_range_qualifiers(PlannerInfo *root)
     }
 }
 
-static void
-clamp_range_qualifier_for_rel(PlannerInfo *root, RelOptInfo *rel)
-{
-    ListCell *lc;
-    List *new_baserestrictinfo;
-    RestrictInfo *prev_rinfo;
-    Index new_min_security;
-
-    if (list_length(rel->baserestrictinfo) < 2)
-    {
-        return;
-    }
-
-    new_baserestrictinfo = NIL;
-    prev_rinfo = NULL;
-    new_min_security = rel->baserestrict_min_security;
-
-    foreach (lc, rel->baserestrictinfo)
-    {
-        RestrictInfo *cur_rinfo = (RestrictInfo *)lfirst(lc);
-        if (prev_rinfo == NULL)
-        {
-            prev_rinfo = cur_rinfo;
-            continue;
-        }
-
-        if (IsA(prev_rinfo->clause, OpExpr) && IsA(cur_rinfo->clause, OpExpr) &&
-            is_exclusive_range((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
-        {
-            RestrictInfo *false_rinfo = create_restrict_info_from_ops(root, prev_rinfo, cur_rinfo);
-            prev_rinfo = false_rinfo;
-            new_min_security = Min(new_min_security, false_rinfo->security_level);
-        }
-        else
-        {
-            new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
-            prev_rinfo = cur_rinfo;
-        }
-    }
-
-    if (prev_rinfo != NULL)
-    {
-        new_baserestrictinfo = lappend(new_baserestrictinfo, prev_rinfo);
-    }
-
-    
-    pfree(rel->baserestrictinfo);
-    rel->baserestrictinfo = new_baserestrictinfo;
-    rel->baserestrict_min_security = new_min_security;
-}
 ```
 
 Добавим мы эту логику сразу после функции `add_base_rels_to_query`, которая
@@ -779,8 +765,7 @@ PSQLRC="./build/.psqlrc" psql postgres
 }
 ```
 
-Больше примеров можно найти в репозитории.
-TODO: ссылка на репозиторий
+Больше таких скриптов и настроек можно найти в [здесь](./repo).
 
 ### Расширение для PostgreSQL
 
