@@ -1,0 +1,24 @@
+diff --git a/src/backend/optimizer/plan/planmain.c b/src/backend/optimizer/plan/planmain.c
+index 7afd434c60..c115e53315 100644
+--- a/src/backend/optimizer/plan/planmain.c
++++ b/src/backend/optimizer/plan/planmain.c
+@@ -22,6 +22,7 @@
+ 
+ #include "optimizer/appendinfo.h"
+ #include "optimizer/clauses.h"
++#include "optimizer/constrexcl.h"
+ #include "optimizer/inherit.h"
+ #include "optimizer/optimizer.h"
+ #include "optimizer/orclauses.h"
+diff --git a/src/backend/optimizer/util/clauses.c b/src/backend/optimizer/util/clauses.c
+index 62650995cb..55388ce796 100644
+--- a/src/backend/optimizer/util/clauses.c
++++ b/src/backend/optimizer/util/clauses.c
+@@ -36,6 +36,7 @@
+ #include "nodes/subscripting.h"
+ #include "nodes/supportnodes.h"
+ #include "optimizer/clauses.h"
++#include "optimizer/constrexcl.h"
+ #include "optimizer/cost.h"
+ #include "optimizer/optimizer.h"
+ #include "optimizer/plancat.h"
