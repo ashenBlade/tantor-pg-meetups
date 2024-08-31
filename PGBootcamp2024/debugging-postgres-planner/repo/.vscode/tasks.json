@@ -68,10 +68,10 @@
                 "showReuseMessage": false,
                 "clear": false
             },
-            "command": "/usr/bin/bash",
+            "command": "/usr/bin/sh",
             "args": [
                 "-c",
-                ". ./dev/pg-dev-config.sh; $SHELL"
+                ". ${workspaceFolder}/dev/pg_dev_config.sh; $SHELL"
             ],
             "problemMatcher": [],
             "isBackground": true
