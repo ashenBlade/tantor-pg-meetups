@@ -73,7 +73,7 @@ new file mode 100644
 index 0000000000..df79fb3b89
 --- /dev/null
 +++ b/src/backend/optimizer/util/constrexcl.c
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,108 @@
 +#include "postgres.h"
 +
 +#include "catalog/pg_operator.h"
@@ -176,7 +176,10 @@ index 0000000000..df79fb3b89
 +	for (size_t i = 1; i < root->simple_rel_array_size; i++)
 +	{
 +		RelOptInfo *rel = root->simple_rel_array[i];
-+		clamp_range_qualifiers_for_rel(root, rel);
++		if (rel != NULL && rel->rtekind == RTE_RELATION)
++		{
++			clamp_range_qualifiers_for_rel(root, rel);
++		}
 +	}
 +}
 \ No newline at end of file
