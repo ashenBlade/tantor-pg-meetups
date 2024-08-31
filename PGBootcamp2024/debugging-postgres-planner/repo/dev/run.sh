@@ -3,12 +3,13 @@
 function print_help {
     cat <<EOM
 Run database and/or PSQL with settings for current installation.
-Usage: $0 [--init-db] [--run-db] [--psql] [--stop-db]
+Usage: $0 [--init-db] [--run-db] [--psql] [--stop-db] [--script=SCRIPT]
 
-    --init-db - initialize database files
-    --run-db - run database using initialized database
-    --psql - run psql
-    --stop-db - stop running database
+    --init-db           Initialize database files
+    --run-db            Run database
+    --psql              Run PSQL
+    --script=SCRIPT     Script for PSQL to run
+    --stop-db           Stop running database
 
 Example: $0 --run-db --psql --stop-db
 EOM
@@ -20,6 +21,7 @@ RUN_DB=""
 RUN_PSQL=""
 STOP_DB=""
 INIT_DB=""
+PSQL_SCRIPT=""
 
 while [[ -n "$1" ]]; do
     ARG="$1"
@@ -35,6 +37,9 @@ while [[ -n "$1" ]]; do
             ;;
         --stop-db)
             STOP_DB="1"
+            ;;
+        --script=*)
+            PSQL_SCRIPT="${ARG#*=}"
             ;;
         --help|-h) 
             print_help
@@ -52,20 +57,24 @@ done
 source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
 source_config_file
 
-if [[ "$INIT_DB" ]]; then
+if [ "$INIT_DB" ]; then
     initdb -U $PGUSER || true
 fi
 
-if [[ "$RUN_DB" ]]; then
+if [ "$RUN_DB" ]; then
     # Not 0 exit code can mean DB already running - do not exit script with error
     pg_ctl start -o '-k ""' || true
 fi
 
-if [[ "$RUN_PSQL" ]]; then
-    psql
-    rm ./dev/backend.pid
+if [ "$RUN_PSQL" ]; then
+    if [ "$PSQL_SCRIPT" ]; then
+        psql -f "$PSQL_SCRIPT"
+    else
+        psql
+        rm ./dev/backend.pid
+    fi
 fi
 
-if [[ "$STOP_DB" ]]; then
+if [ "$STOP_DB" ]; then
     pg_ctl stop || true
 fi
