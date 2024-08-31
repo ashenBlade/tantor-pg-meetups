@@ -7,6 +7,7 @@ Usage: $0 --full|--build
 
     --build         Clean build artifacts: object files etc...
     --full          Reset repository to initial state
+    -h, --help      Print this help message
 
 Example: $0 --full
 EOM

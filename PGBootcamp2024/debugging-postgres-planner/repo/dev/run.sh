@@ -2,6 +2,7 @@
 
 function print_help {
     cat <<EOM
+Run database and/or PSQL with settings for current installation.
 Usage: $0 [--init-db] [--run-db] [--psql] [--stop-db]
 
     --init-db - initialize database files

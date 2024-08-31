@@ -5,9 +5,12 @@ function print_help {
 Run tests for PostgreSQL
 Usage: $0 --regress|--full [-j N,--jobs=N]
 
-    --regress - run regress tests (make check)
-    --full - run all tests (make check-world)
-    -j N | --jobs=N - specify number of threads for make
+Options:
+
+    --regress           Run regress tests (~ make check)
+    --full              Run all tests (~ make check-world)
+    -j N, --jobs=N      Specify number of jobs for make
+    -h, --help          Print this help message
 
 Example: $0 --regress -j 12
 EOM
@@ -19,7 +22,7 @@ THREADS=""
 FULL=""
 REGRESS=""
 
-while [[ -n "$1" ]]; do
+while [ "$1" ]; do
     ARG="$1"
     case "$ARG" in
         -j)
@@ -35,12 +38,13 @@ while [[ -n "$1" ]]; do
         --full)
             FULL="1"    
             ;;
-        --help)
+        -h|--help)
             print_help
             exit 0
             ;;
         *)
             echo "Unknnown argument: $ARG"
+            print_help
             exit 1
             ;;
     esac
@@ -50,14 +54,14 @@ done
 source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
 source_config_file
 
-if [[ "$THREADS" ]]; then
+if [ "$THREADS" ]; then
     THREADS="-j $THREADS"
 fi
 
-if [[ "$REGRESS" ]]; then
+if [ "$REGRESS" ]; then
     make check $THREADS
 fi
 
-if [[ "$FULL" ]]; then
+if [ "$FULL" ]; then
     make check-world $THREADS
 fi

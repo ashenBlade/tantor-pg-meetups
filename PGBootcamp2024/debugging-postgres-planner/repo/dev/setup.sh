@@ -2,12 +2,16 @@
 
 function print_help {
     cat <<EOM 
-Setup environment for PostgreSQL development
+Setup environment for PostgreSQL development.
 Usage: $0
+
+Options:
+    -h, --help          Print this help message
 EOM
 }
 
-case "$1" in
+if [ "$1" ]; then
+    case "$1" in
     --help|-h)
         print_help
         exit 0
@@ -16,7 +20,8 @@ case "$1" in
         echo "Unknown option: $1"
         exit 1
         ;;
-esac
+    esac
+fi
 
 set -e
 cd "$(dirname ${BASH_SOURCE[0]:-$0})/.."
@@ -47,6 +52,8 @@ export LD_LIBRARY_PATH="\$PGINSTDIR/lib:\$LD_LIBRARY_PATH"
 export PSQLRC="${PSQLRC_FILE}"
 EOF
 
+chmod +x "./dev/pg_dev_config.sh"
+
 cat <<EOF >"$PSQLRC_FILE"
 \o ${PWD}/dev/backend.pid
 select pg_backend_pid() as pid
@@ -55,5 +62,3 @@ select pg_backend_pid() as pid
 \o
 select pg_backend_pid();
 EOF
-
-chmod +x "$PSQLRC_FILE"

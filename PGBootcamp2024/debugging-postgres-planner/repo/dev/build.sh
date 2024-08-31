@@ -5,7 +5,10 @@ function print_help {
 Build PostgreSQL sources
 Usage: $0 [-j N|--jobs=N]
 
+Options:
+
     -j N, --jobs=N      Specify number of threads to use
+    -h, --help          Print this help message
 
 Example: $0 -j 12
 EOM
@@ -14,7 +17,7 @@ EOM
 set -e
 
 THREADS=""
-while [[ -n "$1" ]]; do
+while [ "$1" ]; do
     ARG="$1"
     case $ARG in
     -j)
@@ -23,6 +26,15 @@ while [[ -n "$1" ]]; do
         ;;
     --jobs=*)
         THREADS="${$1#*=}"
+        ;;
+    -h|--help)
+        print_help
+        exit 0
+        ;;
+    *)
+        echo "Unknown argument: $ARG"
+        print_help
+        exit 1
         ;;
     esac
     shift
