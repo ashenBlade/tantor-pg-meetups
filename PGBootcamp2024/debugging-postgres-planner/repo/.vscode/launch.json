@@ -6,7 +6,7 @@
             "type": "cppdbg",
             "request": "attach",
             "program": "${workspaceFolder}/src/backend/postgres",
-            "processId": "${input:currentBackendPid}",
+            "processId": "${command:pickProcess}",
             "MIMode": "gdb",
             "setupCommands": [
                 {
@@ -15,18 +15,6 @@
                     "ignoreFailures": true
                 }
             ]
-        }
-    ],
-    "inputs": [
-        {
-            "id": "currentBackendPid",
-            "type": "command",
-            "command": "shellCommand.execute",
-            "args": {
-                "command": "${workspaceFolder}/dev/get_current_backend_pid.sh",
-                "cwd": "${workspaceFolder}",
-                "useFirstResult": true
-            }
         }
     ]
 }
