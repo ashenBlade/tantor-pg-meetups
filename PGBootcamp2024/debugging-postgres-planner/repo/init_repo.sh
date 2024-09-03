@@ -87,18 +87,6 @@ fi
 echo "Copying development scripts into postgresql/dev"
 cp -r dev postgresql/dev
 
-# Setup VS Code
-if code --version >/dev/null 2>&1; then
-    echo "VS Code detected"
-    echo "Copying VS Code configuration files into postgresql/dev"
-    cp -r .vscode postgresql/.vscode
-    
-    echo "Installing extension 'C/C++'"
-    code --install-extension ms-vscode.cpptools 2>/dev/null
-    echo "Installing extension 'PostgreSQL Hacker Helper'"
-    code --install-extension ash-blade.postgresql-hacker-helper 2>/dev/null
-fi
-
 # Applying patches
 echo "Applying Constraint Exclusion setup patch"
 
@@ -122,15 +110,32 @@ cd ..
 # Configure repository
 if [ ! -f "postgresql/config.status" ] || [ "$FORCE_MODE" ]; then
     echo "Running setup script"
-    (cd postgresql && ./dev/setup.sh)
+    (
+        cd postgresql
+        ./dev/setup.sh --configure-args="--without-icu --without-zstd --without-zlib --disable-tap-tests"
+    )
 else
     echo "Seems that repository already configured - config.status file exists"
     echo "Skipping setup script"
 fi
 
+# Setup VS Code
+if code --version >/dev/null 2>&1; then
+    echo "VS Code detected"
+    echo "Copying VS Code configuration files into postgresql/dev"
+    cp -r .vscode postgresql/.vscode
+    echo "Installing extension 'C/C++'"
+    code --install-extension ms-vscode.cpptools 2>/dev/null || true
+    echo "Installing extension 'PostgreSQL Hacker Helper'"
+    code --install-extension ash-blade.postgresql-hacker-helper 2>/dev/null || true
+fi
+
 echo "--------------------"
 echo "Setting up completed"
 echo ""
-echo "Development scripts located under postgresql/dev folder"
+echo "Development scripts located under 'postgresql/dev' folder"
 echo "For more info run each of them with '-h' or '--help' flags"
 echo "Example: ./dev/build.sh --help"
+echo ""
+echo "You can open VS Code using 'code postgresql --goto postgresql/src/backend/optimizer/util/constrexcl.c'"
+echo "and press 'Ctrl + Shift + B' to start build"

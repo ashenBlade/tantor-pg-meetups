@@ -3,15 +3,24 @@
 function print_help {
     cat <<EOM 
 Setup environment for PostgreSQL development.
-Usage: $0
+Usage: $0 [--configure-args=ARGS]
 
 Options:
-    -h, --help          Print this help message
+    -h, --help              Print this help message
+    --configure-args=ARGS   Additional arguments for configure script
+
+Example:
+    $0 --configure-args="--without-icu"
 EOM
 }
 
-if [ "$1" ]; then
-    case "$1" in
+CONFIGURE_ARGS=""
+while [ "$1" ]; do
+    ARG="$1"
+    case "$ARG" in
+    --configure-args=*)
+        CONFIGURE_ARGS="${ARG#*=}"
+        ;;
     --help|-h)
         print_help
         exit 0
@@ -21,7 +30,7 @@ if [ "$1" ]; then
         exit 1
         ;;
     esac
-fi
+done
 
 set -e
 cd "$(dirname ${BASH_SOURCE[0]:-$0})/.."
@@ -36,7 +45,8 @@ INSTALL_PATH="$PWD/build"
             --enable-tap-tests \
             --enable-depend \
             CFLAGS="$CFLAGS" \
-            CPPFLAGS="$CPPFLAGS"
+            CPPFLAGS="$CPPFLAGS" \
+            $CONFIGURE_ARGS
 
 PSQLRC_FILE="${PWD}/dev/.psqlrc"
 cat <<EOF >"./dev/pg_dev_config.sh"
