@@ -13,7 +13,8 @@
             "type": "process",
             "command": "${workspaceFolder}/dev/build.sh",
             "args": [
-                "-j=${input:threads}"
+                "-j",
+                "${input:threads}"
             ],
             "problemMatcher": [],
             "detail": "Run build and install DB with all contribs",
