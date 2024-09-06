@@ -3,6 +3,8 @@
 function print_help {
     cat <<EOM
 Run database and/or PSQL with settings for current installation.
+Log file is written to ./dev/postgresql.log
+
 Usage: $0 [--init-db] [--run-db] [--psql] [--stop-db] [--script=SCRIPT]
 
     --init-db           Initialize database files
@@ -63,7 +65,7 @@ fi
 
 if [ "$RUN_DB" ]; then
     # Not 0 exit code can mean DB already running - do not exit script with error
-    pg_ctl start -o '-k ""' || true
+    pg_ctl start -o '-k ""' -l ./dev/postgresql.log || true
 fi
 
 if [ "$RUN_PSQL" ]; then

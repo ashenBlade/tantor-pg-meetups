@@ -46,6 +46,8 @@ cd "$(dirname "${BASH_SOURCE[0]:-$0}")"
 # Stop at first error
 set -e
 
+NEW_FILES="1"
+
 # Download sources
 if [ ! -d 'postgresql' ] || [ "$FORCE_MODE" ]; then
     if [ -d 'postgresql' ]; then
@@ -81,6 +83,7 @@ EOF
     fi
 else
     echo "'postgresql' directory already exists. Skipping source files downloading"
+    NEW_FILES=""
 fi
 
 # Setup dev scripts
