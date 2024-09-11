@@ -28,6 +28,7 @@ while [[ "$1" ]]; do
         --help|-h)
             print_help
             exit 0
+            ;;
         *)
             echo "Unknown argument: $ARG"
             exit 1

@@ -36,10 +36,10 @@ index 62650995cb..55388ce796 100644
  #include "optimizer/plancat.h"
 diff --git a/src/backend/optimizer/util/constrexcl.c b/src/backend/optimizer/util/constrexcl.c
 new file mode 100644
-index 0000000000..6dabfe5986
+index 0000000000..e8cfe09f6d
 --- /dev/null
 +++ b/src/backend/optimizer/util/constrexcl.c
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,27 @@
 +#include "postgres.h"
 +
 +#include "catalog/pg_operator.h"
@@ -51,27 +51,25 @@ index 0000000000..6dabfe5986
 +#include "utils/lsyscache.h"
 +
 +static bool
-+extract_const_compare_expression(OpExpr *expr, Var **out_var, Const **out_const)
++extract_operands(OpExpr *expr, Var **out_var, Const **out_const)
 +{
 +}
 +
-+bool
-+is_mutually_exclusive(OpExpr *left, OpExpr *right)
++bool is_mutually_exclusive(OpExpr *left, OpExpr *right)
 +{
 +}
 +
 +static void
-+clamp_range_qualifiers_for_rel(PlannerInfo *root, RelOptInfo *rel)
++collapse_mutually_exclusive_quals_for_rel(PlannerInfo *root, RelOptInfo *rel)
 +{
 +}
 +
-+void
-+clamp_range_qualifiers(PlannerInfo *root)
++void collapse_mutually_exclusive_quals(PlannerInfo *root)
 +{
 +}
 diff --git a/src/include/optimizer/constrexcl.h b/src/include/optimizer/constrexcl.h
 new file mode 100644
-index 0000000000..bc9a46d7c3
+index 0000000000..f2a64697ea
 --- /dev/null
 +++ b/src/include/optimizer/constrexcl.h
 @@ -0,0 +1,10 @@
@@ -82,7 +80,7 @@ index 0000000000..bc9a46d7c3
 +#include "nodes/pathnodes.h"
 +
 +extern bool is_mutually_exclusive(OpExpr *left, OpExpr *right);
-+extern void clamp_range_qualifiers(PlannerInfo *info);
++extern void collapse_mutually_exclusive_quals(PlannerInfo *info);
 +
 +#endif
 \ No newline at end of file

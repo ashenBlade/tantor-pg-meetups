@@ -66,10 +66,5 @@ EOF
 chmod +x "./dev/pg_dev_config.sh"
 
 cat <<EOF >"$PSQLRC_FILE"
-\o ${PWD}/dev/backend.pid
-select pg_backend_pid() as pid
-\gset
-\qecho :pid
-\o
 select pg_backend_pid();
 EOF

@@ -126,7 +126,7 @@ fi
 if code --version >/dev/null 2>&1; then
     echo "VS Code detected"
     echo "Copying VS Code configuration files into postgresql/dev"
-    cp -r .vscode postgresql/.vscode
+    cp -r .vscode postgresql/
     echo "Installing extension 'C/C++'"
     code --install-extension ms-vscode.cpptools 2>/dev/null || true
     echo "Installing extension 'PostgreSQL Hacker Helper'"
