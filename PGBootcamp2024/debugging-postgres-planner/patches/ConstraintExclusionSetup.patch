@@ -39,7 +39,7 @@ new file mode 100644
 index 0000000000..e8cfe09f6d
 --- /dev/null
 +++ b/src/backend/optimizer/util/constrexcl.c
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +#include "postgres.h"
 +
 +#include "catalog/pg_operator.h"
@@ -55,7 +55,8 @@ index 0000000000..e8cfe09f6d
 +{
 +}
 +
-+bool is_mutually_exclusive(OpExpr *left, OpExpr *right)
++bool 
++is_mutually_exclusive(OpExpr *left, OpExpr *right)
 +{
 +}
 +
@@ -64,7 +65,8 @@ index 0000000000..e8cfe09f6d
 +{
 +}
 +
-+void collapse_mutually_exclusive_quals(PlannerInfo *root)
++void 
++collapse_mutually_exclusive_quals(PlannerInfo *root)
 +{
 +}
 diff --git a/src/include/optimizer/constrexcl.h b/src/include/optimizer/constrexcl.h

@@ -82,12 +82,12 @@ echo "Copying development scripts into $SRC_DIR/dev"
 cp -r dev $SRC_DIR
 
 # Applying patches
-echo "Applying Constraint Exclusion setup patch"
-
-(
-    cd $SRC_DIR
-    patch -p1 < ../patches/ConstraintExclusionSetup.patch
-)
+echo "Copying setup files for practice"
+cp setup/planmain.c postgresql/src/backend/optimizer/plan/planmain.c
+cp setup/Makefile postgresql/src/backend/optimizer/util/Makefile
+cp setup/clauses.c postgresql/src/backend/optimizer/util/clauses.c
+cp setup/constrexcl.c postgresql/src/backend/optimizer/util/constrexcl.c
+cp setup/constrexcl.h postgresql/src/include/optimizer/constrexcl.h
 
 # Configure repository
 if [ ! -f "$SRC_DIR/config.status" ]; then
