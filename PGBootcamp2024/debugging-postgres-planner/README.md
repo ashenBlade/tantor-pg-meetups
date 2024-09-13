@@ -421,6 +421,29 @@ extract_operands(OpExpr *expr, Var **out_var, Const **out_const)
 }
 ```
 
+Перейдем к реализации основной логики. Она будет находится в функции `is_mutually_exclusive`.
+Она работает следующим образом: на вход принимает 2 `OpExpr` (вызовы операторов) и
+проверяет, что они подходят под шаблон (см. выше) и если так, то возвращает `true`.
+
+В начале воспользуемся написанной ранее функцией и получим обе части операторов.
+
+```c
+Var *left_var;
+Const *left_const;
+Var *right_var;
+Const *right_const;
+
+if (!extract_operands(left, &left_var, &left_const))
+{
+    return false;
+}
+
+if (!extract_operands(right, &right_var, &right_const))
+{
+    return false;
+}
+```
+
 Теперь для каждого из выражений необходимо проверить, что соответствующие
 операнды равны. Для сравнения узлов используется функция `equal`.
 
@@ -488,7 +511,6 @@ is_mutually_exclusive(OpExpr *left, OpExpr *right)
 
     return get_negator(left->opno) == right->opno;
 }
-
 ```
 
 Теперь осталось добавить эту логику в нужное место. Вначале добавим в 1 этап
@@ -565,7 +587,8 @@ CREATE TABLE tbl2(
 И тестовый запрос:
 
 ```sql
-EXPLAIN ANALYZE SELECT id FROM tbl1 
+EXPLAIN ANALYZE 
+SELECT * FROM tbl1 
 WHERE
     value > 0
   AND
@@ -648,7 +671,7 @@ WHERE
 
 Смотрим на поля и убеждаемся, что они равны.
 Различаются только поля `location`, но они нужны только для отладки, то есть проверка должна пройти.
-Делаем шаг - проверка прошла успешно. 
+Делаем шаг - проверка прошла успешно.
 На всякий случай, проверим еще и равенство `Const` вручную.
 
 ![Const левого и правого выражений](./img/parser-const-comparison.png)
@@ -667,8 +690,9 @@ WHERE
 он учитывает условия только в `WHERE`. Вот такой запрос оптимизирован не будет:
 
 ```sql
-SELECT id FROM tbl t1 
-    JOIN tbl t2 
+EXPLAIN ANALYZE
+SELECT * FROM tbl1 t1 
+    JOIN tbl2 t2 
        ON t1.value > 0 
     WHERE t1.value <= 0;
 ```
@@ -690,7 +714,9 @@ SELECT id FROM tbl t1
 ограничений, наложенных на таблицу. Если в JOIN'е были условия, которые относились
 только к 1 таблице, то они попадут в этот список вместе с условиями из `WHERE`.
 
-Напишем функцию, которая будет применять логику к одному `RelOptInfo`.
+Напишем функцию, которая будет применять логику к одному `RelOptInfo` - обходим
+весь список ограничений и, когда находим 2 рядом стоящих `OpExpr` подходящих под
+шаблон, заменяем весь список на список из единственного `FALSE`.
 Ее сигнатура будет следующей:
 
 ```c
@@ -700,7 +726,7 @@ collapse_mutually_exclusive_quals_for_rel(PlannerInfo *root, RelOptInfo *rel)
 }
 ```
 
-Вначале, проверим что у нас как минимум 2 ограничения. В противном случае,
+Вначале, проверим что у нас как минимум 2 ограничения (условия). В противном случае,
 находить нечего.
 
 ```c
@@ -716,7 +742,7 @@ collapse_mutually_exclusive_quals_for_rel(PlannerInfo *root, RelOptInfo *rel)
 ```
 
 Теперь начнется основная логика. Нам необходимо пройтись по всему списку и обнаружить 2 рядом стоящих взаимоисключающих `OpExpr`.
-Для упрощения кода, мы сразу прочитаем первый элемент этого списка и итерироваться начнем с 1-ого (индексация с 0).
+Для упрощения кода, мы сразу прочитаем первый элемент этого списка и итерироваться начнем с 1 (индексация с 0).
 
 ```c
 static void
@@ -800,7 +826,7 @@ collapse_mutually_exclusive_quals_for_rel(PlannerInfo *root, RelOptInfo *rel)
     {
         RestrictInfo *cur_rinfo = (RestrictInfo *)lfirst(lc);
         if (IsA(prev_rinfo->clause, OpExpr) && IsA(cur_rinfo->clause, OpExpr) &&
-            is_exclusive_range((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
+            is_mutually_exclusive((OpExpr *)prev_rinfo->clause, (OpExpr *)cur_rinfo->clause))
         {
             RestrictInfo *false_rinfo = make_restrictinfo(root,
                                                           (Expr *)makeBoolConst(false, false),
