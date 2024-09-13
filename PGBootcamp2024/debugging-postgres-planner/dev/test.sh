@@ -59,9 +59,13 @@ if [ "$THREADS" ]; then
 fi
 
 if [ "$REGRESS" ]; then
-    make check $THREADS
+    {
+        make check $THREADS
+    } 2>&1 | tee -a $(get_log_file "test")
 fi
 
 if [ "$FULL" ]; then
-    make check-world $THREADS
+    {
+        make check-world $THREADS    
+    } 2>&1 | tee -a $(get_log_file "test")
 fi

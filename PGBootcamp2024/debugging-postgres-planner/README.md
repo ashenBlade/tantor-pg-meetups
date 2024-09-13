@@ -24,7 +24,7 @@
 
 Для сборки и отладки с текущим скриптом необходимо установить:
 
-- `git` или `wget` + `tar` (для скачивания исходных файлов)
+- `tar` + `wget` или `curl` (для скачивания исходных файлов)
 - `libreadline`
 - `bison`
 - `flex`
@@ -38,17 +38,17 @@
 ```shell
 # Debian based
 sudo apt update
-sudo apt install build-essential gdb bison flex libreadline-dev git
+sudo apt install build-essential gdb bison flex libreadline-dev
 
 # RPM based
 sudo yum update
-sudo yum install gcc gdb bison flex make readline-devel perl-CPAN git
-
+sudo yum install gcc gdb bison flex make readline-devel perl-CPAN
 ```
 
-Ссылка на архивы с 16.4 версией - [https://ftp.postgresql.org/pub/source/v16.4](https://ftp.postgresql.org/pub/source/v16.4).
+Ссылка на архив с 16.4 версией -
+[https://ftp.postgresql.org/pub/source/v16.4/postgresql-16.4.tar.gz](https://ftp.postgresql.org/pub/source/v16.4/postgresql-16.4.tar.gz).
 
-Настройку окружения можно произвести следующим образом (запуск не от root'а):
+Настройку окружения можно произвести следующим образом (запуск **не** от root'а):
 
 ```shell
 # Запускаем скрипт инициализации репозитория: скачивание файлов,
@@ -69,9 +69,6 @@ code . --goto src/backend/optimizer/util/constrexcl.c  \
         --goto src/backend/optimizer/util/clauses.c    \
         --goto src/backend/optimizer/plan/planmain.c
 ```
-
-> Если при установке произошла ошибка, можно запустить установку полностью
-> заново передав флаг `-f` скрипту `init_repo.sh`: `./init_repo.sh -f`.
 
 После этого можно запускать PSQL и выполнять скрипты из `queries_constrexcl.sql`.
 
@@ -161,23 +158,24 @@ constant folding (вычисляем выражения с константны�
 ```c
 standard_planner()
 {
-    /* Initialize global state */
+    /* Инициализируем глобальное состояние планировщика */
     subquery_planner()
     {
-        /* Parse tree preprocessing */
+        /* Предобработка дерева запроса */
         grouping_planner()
         {
-            /* Setup grouping operations support */
+            /* Настройка операций обработки данных */
             query_planner()
             {
-                /* Setup planner info */
-                /* Create Scan path */
+                /* Инициализация планировщика */
+                /* ... */
+                /* Создание путей обхода таблиц */
             }
-            /* Decorate with sort/agg/window/... paths */
+            /* Добавление узлов обработки данных (сортировка, группировка и т.д.) */
         }
-        /* Select cheapest path */
+        /* Выбор самого дешевого пути */
     }
-    /* Create plan for whole query */
+    /* Создание плана выполнения */
 }
 ```
 
@@ -377,13 +375,13 @@ if (list_length(expr->args) != 2)
 соответственно:
 
 ```c++
-/* First element - table column */
+/* Первый аргумент - столбец таблицы */
 if (!IsA(linitial(args), Var))
 {
     return false;
 }
 
-/* Second element - constant */
+/* Второй аргумент - константа */
 if (!IsA(llast(args), Const))
 {
     return false;
@@ -399,19 +397,19 @@ if (!IsA(llast(args), Const))
 static bool
 extract_operands(OpExpr *expr, Var **out_var, Const **out_const)
 {
-    /* Check exactly 2 operands */
+    /* Должно быть ровно 2 аргумента */
     if (list_length(expr->args) != 2)
     {
         return false;
     }
 
-    /* First element - attribute */
+    /* Первый аргумент - столбец таблицы */
     if (!IsA(linitial(expr->args), Var))
     {
         return false;
     }
 
-    /* Second element - constant */
+    /* Второй аргумент - константа */
     if (!IsA(llast(expr->args), Const))
     {
         return false;
@@ -535,7 +533,7 @@ simplify_and_arguments(List *args,
             /* Проверка на взаимоиключение */
             if (is_mutually_exclusive((OpExpr *)arg, (OpExpr *)llast(newargs)))
             {
-                /* Говорим, что все можно заменить на FALSE */
+                /* Говорим, что все условия можно заменить на FALSE */
                 *forceFalse = true;
                 return NIL;
             }

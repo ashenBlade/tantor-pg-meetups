@@ -47,7 +47,9 @@ if [[ -n "$THREADS" ]]; then
     THREADS="-j $THREADS"
 fi
 
-make $THREADS
-make install
-source "$CONFIG_FILE"
-make install-world-bin
+{
+    make $THREADS
+    make install
+    source "$CONFIG_FILE"
+    make install-world-bin
+} 2>&1 | tee -a $(get_log_file "build")

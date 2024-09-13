@@ -40,17 +40,18 @@ CFLAGS="-O0 -g $CFLAGS"
 CPPFLAGS="-O0 -g $CPPFLAGS"
 INSTALL_PATH="$PWD/build"
 
-./configure --prefix="$INSTALL_PATH" \
-            --enable-debug \
-            --enable-cassert \
-            --enable-tap-tests \
-            --enable-depend \
-            CFLAGS="$CFLAGS" \
-            CPPFLAGS="$CPPFLAGS" \
-            $CONFIGURE_ARGS
-
-PSQLRC_FILE="${PWD}/dev/.psqlrc"
-cat <<EOF >"./dev/pg_dev_config.sh"
+{
+    ./configure --prefix="$INSTALL_PATH" \
+                --enable-debug \
+                --enable-cassert \
+                --enable-tap-tests \
+                --enable-depend \
+                CFLAGS="$CFLAGS" \
+                CPPFLAGS="$CPPFLAGS" \
+                $CONFIGURE_ARGS
+    
+    PSQLRC_FILE="${PWD}/dev/.psqlrc"
+    cat <<EOF >"./dev/pg_dev_config.sh"
 export PGINSTDIR="$INSTALL_PATH"
 export PGDATA="$INSTALL_PATH/data"
 export PGHOST="localhost"
@@ -63,8 +64,10 @@ export LD_LIBRARY_PATH="\$PGINSTDIR/lib:\$LD_LIBRARY_PATH"
 export PSQLRC="${PSQLRC_FILE}"
 EOF
 
-chmod +x "./dev/pg_dev_config.sh"
+    chmod +x "./dev/pg_dev_config.sh"
 
-cat <<EOF >"$PSQLRC_FILE"
+    cat <<EOF >"$PSQLRC_FILE"
 select pg_backend_pid();
 EOF
+} 2>&1 | tee -a $(get_log_file "setup")
+

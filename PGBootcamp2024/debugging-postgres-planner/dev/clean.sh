@@ -40,9 +40,13 @@ done
 source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
 
 if [[ "$BUILD" ]]; then
-    make clean
+    {
+        make clean
+    } 2>&1 | tee -a $(get_log_file "clean")
 fi
 
 if [[ "$FULL" ]]; then
-    make distclean
+    {
+        make distclean
+    } 2>&1 | tee -a $(get_log_file "clean")
 fi

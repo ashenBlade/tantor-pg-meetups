@@ -60,12 +60,16 @@ source "$(dirname ${BASH_SOURCE[0]:-$0})/utils.sh"
 source_config_file
 
 if [ "$INIT_DB" ]; then
-    initdb -U $PGUSER || true
+    {
+        initdb -U $PGUSER || true
+    } 2>&1 | tee -a $(get_log_file "initdb")
 fi
 
 if [ "$RUN_DB" ]; then
     # Not 0 exit code can mean DB already running - do not exit script with error
-    pg_ctl start -o '-k ""' -l ./dev/postgresql.log || true
+    {
+        pg_ctl start -o '-k ""' -l ./dev/postgresql.log || true
+    }  2>&1 | tee -a $(get_log_file "pg_ctl")
 fi
 
 if [ "$RUN_PSQL" ]; then
@@ -73,10 +77,12 @@ if [ "$RUN_PSQL" ]; then
         psql -f "$PSQL_SCRIPT"
     else
         psql
-        rm ./dev/backend.pid
+        rm -f ./dev/backend.pid
     fi
 fi
 
 if [ "$STOP_DB" ]; then
-    pg_ctl stop || true
+    {
+        pg_ctl stop || true
+    } 2>&1 | tee -a $(get_log_file "pg_ctl")
 fi
