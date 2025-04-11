@@ -1,0 +1,1167 @@
+diff --git a/src/backend/optimizer/plan/analyzejoins.c b/src/backend/optimizer/plan/analyzejoins.c
+index 5f3cce873a0..8a976747d58 100644
+--- a/src/backend/optimizer/plan/analyzejoins.c
++++ b/src/backend/optimizer/plan/analyzejoins.c
+@@ -32,6 +32,7 @@
+ #include "optimizer/restrictinfo.h"
+ #include "optimizer/tlist.h"
+ #include "utils/lsyscache.h"
++#include "nodes/makefuncs.h"
+ 
+ /* local functions */
+ static bool join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo);
+@@ -53,7 +54,6 @@ static bool is_innerrel_unique_for(PlannerInfo *root,
+ 								   JoinType jointype,
+ 								   List *restrictlist);
+ 
+-
+ /*
+  * remove_useless_joins
+  *		Check for relations that don't actually need to be joined at all,
+@@ -1326,3 +1326,437 @@ is_innerrel_unique_for(PlannerInfo *root,
+ 	/* Let rel_is_distinct_for() do the hard work */
+ 	return rel_is_distinct_for(root, innerrel, clause_list);
+ }
++
++typedef struct replace_subquery_parent_vars_context
++{
++	int old_varno;
++	int old_varattno;
++	Var *substitution;
++} replace_subquery_parent_vars_context;
++
++static Node *replace_subquery_parent_vars_mutator(Node *node, void *arg)
++{
++	if (node == NULL)
++		return NULL;
++	
++	if (IsA(node, Var))
++	{
++		Var *var = (Var *)node;
++		replace_subquery_parent_vars_context *context = (replace_subquery_parent_vars_context *)arg;
++		if (   var->varno == context->old_varno
++			&& var->varattno == context->old_varattno
++			&& var->varlevelsup == 0)
++		{
++			return (Node *)copyObject(context->substitution);
++		}
++	}
++
++	return expression_tree_mutator(node, &replace_subquery_parent_vars_mutator, arg);
++}
++
++typedef struct update_varnos_after_push_context
++{
++	int old_joined_rti;
++	int new_joined_rti;
++	int subquery_rti;
++	Query *parse;
++	Query *subquery;
++} update_varnos_after_push_context;
++
++static TargetEntry *get_target_entry(List *targetList, AttrNumber attnum)
++{
++	ListCell *lc;
++	foreach(lc, targetList)
++	{
++		TargetEntry *te = (TargetEntry *)lfirst(lc);
++		if (te->resno == attnum)
++			return te;
++	}
++
++	return NULL;
++}
++
++static Node *update_varnos_after_push_mutator(Node *node, void *arg)
++{
++	update_varnos_after_push_context *context = (update_varnos_after_push_context *)arg;
++	
++	if (IsA(node, Var))
++	{
++		Var *var = (Var *)node;
++		if (var->varlevelsup != 0)
++			return node;
++
++		if (var->varno == context->old_joined_rti)
++		{
++			/* Обновляем varno соединяемого отношения */
++			var->varno = context->new_joined_rti;
++		}
++		else if (var->varno == context->subquery_rti)
++		{
++			/* Заменяем Var на выражение в списке SELECT подзапроса */
++			TargetEntry *te = get_target_entry(context->subquery->targetList, 
++											   var->varattno);
++			return (Node *) copyObject(te->expr);
++		}
++	}
++
++	return expression_tree_mutator(node, &update_varnos_after_push_mutator, arg);
++}
++
++static void remove_rte_fromlist(Query *parse, int rtindex)
++{
++	ListCell *lc;
++	List *new_fromlist = NIL;
++	foreach(lc, parse->jointree->fromlist)
++	{
++		Node *node = (Node *)lfirst(lc);
++		if (IsA(node, RangeTblRef) && ((RangeTblRef *)node)->rtindex == rtindex)
++			continue;
++
++		new_fromlist = lappend(new_fromlist, node);
++	}
++
++	parse->jointree->fromlist = new_fromlist;
++}
++
++
++
++static List *move_rte_to_subquery(PlannerInfo *root, Query *subquery,
++								  RelOptInfo *pushed_rel, int rtindex,
++								  List *joinlist, RestrictInfo *join_clause)
++{
++	RangeTblRef *rtr;
++	RTEPermissionInfo *rte_perminfo;
++	RangeTblEntry *rte;
++	List *quals;
++	int removed;
++
++	/* Берем RangeTblEntry из родителя */
++	rte = root->simple_rte_array[rtindex];
++	remove_rte_fromlist(root->parse, rtindex);
++
++	/* Переносим его в Range Table подзапроса */
++	subquery->rtable = lappend(subquery->rtable, rte);
++
++	/* И добавляем в список FROM подзапроса */
++	rtr = makeNode(RangeTblRef);
++	rtr->rtindex = list_length(subquery->rtable);
++	subquery->jointree->fromlist = lappend(subquery->jointree->fromlist, rtr);
++
++	/* Не забываем переместить RTEPermissionInfo */
++	rte_perminfo = list_nth(root->parse->rteperminfos, rte->perminfoindex - 1);
++	subquery->rteperminfos = lappend(subquery->rteperminfos, rte_perminfo);
++	rte->perminfoindex = list_length(subquery->rteperminfos);
++
++	/* Удаляем отношение из joinlist */
++	joinlist = remove_rel_from_joinlist(joinlist, rtindex, &removed);
++
++	/* Выставляем новые условия в подзапросе */
++	quals = list_make1(join_clause->clause);
++	if (pushed_rel->baserestrictinfo)
++	{
++		ListCell *lc;
++		foreach(lc, pushed_rel->baserestrictinfo)
++		{
++			RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
++			quals = lappend(quals, rinfo->clause);
++		}
++	}
++
++	if (pushed_rel->joininfo)
++	{
++		ListCell *lc;
++		foreach(lc, pushed_rel->joininfo)
++		{
++			RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
++			quals = lappend(quals, rinfo->clause);
++		}
++	}
++
++	if (subquery->jointree->quals)
++		subquery->jointree->quals = (Node *)makeBoolExpr(AND_EXPR, list_concat(quals, list_make1(subquery->jointree->quals)), -1);
++	else
++		subquery->jointree->quals = (Node *)makeBoolExpr(AND_EXPR, quals, -1);
++
++	return joinlist;
++}
++
++static List* pushdown_single_rel(PlannerInfo *root, List *joinlist, RestrictInfo *join_clause,
++								 Var *subquery_var, Var *pushed_var,
++								 RelOptInfo *subquery_rel, int subquery_varno, 
++								 RelOptInfo *pushed_rel, int pushed_varno)
++{
++	Query *subquery = root->simple_rte_array[subquery_var->varno]->subquery;
++	replace_subquery_parent_vars_context replace_context;
++	update_varnos_after_push_context update_context;
++	int new_pushed_varno = list_length(subquery->rtable) + 1;
++	ListCell *lc;
++
++	/* 
++	 * Обновляю ссылки на Var в JOIN условиях: для REL меняю просто varno (new_pushed_varno)
++	 *                                         для SUB меняю Var на Expr из targetList
++	 */
++	update_context.new_joined_rti = new_pushed_varno;
++	update_context.old_joined_rti = pushed_varno;
++	update_context.parse = root->parse;
++	update_context.subquery = root->simple_rte_array[subquery_varno]->subquery;
++	update_context.subquery_rti = subquery_varno;
++
++	foreach(lc, pushed_rel->joininfo)
++	{
++		RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
++		rinfo->clause = (Expr *) update_varnos_after_push_mutator((Node *)rinfo->clause, &update_context);
++	}
++
++	join_clause->clause = (Expr *) update_varnos_after_push_mutator((Node *)join_clause->clause, &update_context);
++
++	/* 
++	 * Обновляю Var в условиях WHERE - varno меняю на новый
++	 */
++	replace_context.old_varno = pushed_var->varno;
++	replace_context.old_varattno = pushed_var->varattno;
++	replace_context.substitution = subquery_var;
++	foreach(lc, pushed_rel->baserestrictinfo)
++	{
++		RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
++		rinfo->clause = (Expr *) replace_subquery_parent_vars_mutator((Node *)rinfo->clause, &replace_context);
++	}
++
++	/* 
++	 * Перемещаю RTE в подзапрос
++	 */
++	return move_rte_to_subquery(root, subquery, pushed_rel, pushed_varno, joinlist, join_clause);
++}
++
++static RestrictInfo *generate_joinclause(EquivalenceClass *ec, Var *subquery_var, Var *joined_var)
++{
++	ListCell *lc;
++	RestrictInfo *joinclause = NULL;
++	RestrictInfo *suitable = NULL;
++	
++	/* Вначале находим уже существующее выражение, если есть */
++	foreach(lc, ec->ec_sources)
++	{
++		RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
++		OpExpr *op;
++		Var *left;
++		Var *right;
++
++		if (!IsA(rinfo->clause, OpExpr))
++			continue;
++
++		op = (OpExpr *)rinfo->clause;
++		left = (Var *)get_leftop(op);
++		right = (Var *)get_rightop(op);
++		if (!(   left != NULL && IsA(left, Var)
++			  && right != NULL && IsA(right, Var)))
++			continue;
++		
++		if (equal(left, joined_var))
++		{
++			if (equal(right, subquery_var))
++			{
++				joinclause = rinfo;
++				break;
++			}
++		}
++		else if (equal(left, subquery_var))
++		{
++			if (equal(right, joined_var))
++			{
++				joinclause = rinfo;
++				break;
++			}
++		} else if (   right->vartype == joined_var->vartype && left->vartype == subquery_var->vartype
++				   && right->vartypmod == joined_var->vartypmod && left->vartypmod == subquery_var->vartypmod)
++		{
++			suitable = rinfo;
++		}
++	}
++
++	if (joinclause == NULL)
++	{
++		/* 
++		 * Если не смогли найти, то создаем сами.
++		 * Вначале, проверяем, что типы равны
++		 */
++		if (suitable == NULL ||
++			subquery_var->vartype != joined_var->vartype ||
++			subquery_var->vartypmod != joined_var->vartypmod)
++			return NULL;
++		
++		joinclause = (RestrictInfo *)copyObject(suitable);
++		((OpExpr *)joinclause->clause)->args = list_make2(subquery_var, joined_var);
++	}
++	else
++	{
++		joinclause = (RestrictInfo *)copyObject(joinclause);
++	}
++
++	/* 
++	 * Небольшой хак, чтобы планировщик определял соединяемую таблицу как INNER
++	 * и правильно определил, что ключ уникальный (в функции `relation_has_unique_index_for`)
++	 */
++	if (equal(linitial(((OpExpr *)joinclause->clause)->args), joined_var))
++	{
++		if (joinclause->outer_is_left)
++			joinclause->outer_is_left = false;
++	}
++	else
++	{
++		if (!joinclause->outer_is_left)
++			joinclause->outer_is_left = true;
++	}
++
++	return joinclause;
++}
++
++static bool has_aggs_walker(Node *node, void *arg)
++{
++	/* Находим Aggref - агрегирующую функцию */
++	if (IsA(node, Aggref))
++		return true;
++
++	return expression_tree_walker(node, &has_aggs_walker, arg);
++}
++
++static bool is_agg(Query *subquery, Var *subquery_join_var)
++{
++	Bitmapset *aggs_attnums;
++	ListCell *lc;
++	
++	aggs_attnums = NULL;
++	/* Обходим все выражения в SELECT подзапроса */
++	foreach(lc, subquery->targetList)
++	{
++		TargetEntry *entry = (TargetEntry *)lfirst(lc);
++
++		if (entry->resno == subquery_join_var->varattno)
++		{
++			return has_aggs_walker((Node *)entry->expr, NULL);
++		}	
++	}
++
++	return false;
++}
++
++static List *pushdown_joins_subquery(PlannerInfo *root, List *joinlist,
++									 RelOptInfo *subquery, int subquery_varno)
++{
++	/* Находим все классы эквивалентности, в которых участвует атрибут подзапроса */
++	EquivalenceClass *eclass;
++	RelOptInfo *joined_rel;
++	Var *joined_var;
++	Var *subquery_var;
++	ListCell *lc;
++	RestrictInfo *join_clause;
++
++	/* 
++	 * Находим пару SUB.VAR = REL.VAR
++	 */
++	subquery_var = NULL;
++	joined_var = NULL;
++	eclass = NULL;
++	foreach(lc, root->eq_classes)
++	{
++		EquivalenceClass *ec = lfirst_node(EquivalenceClass, lc);
++		ListCell *lc2;
++
++		if (ec->ec_has_volatile)
++			continue;
++
++		/* Проверяем, что в этом EC есть SUB.VAR */
++		subquery_var = NULL;
++		foreach(lc2, ec->ec_members)
++		{
++			EquivalenceMember *member = (EquivalenceMember *)lfirst(lc2);
++			if (IsA(member->em_expr, Var))
++			{
++				Var *var = (Var *)member->em_expr;
++				if (var->varno == subquery_varno && var->varlevelsup == 0)
++				{
++					subquery_var = var;
++					break;
++				}
++			}
++		}
++
++		if (subquery_var == NULL)
++			continue;
++
++		joined_var = NULL;
++		eclass = NULL;
++		foreach(lc2, ec->ec_members)
++		{
++			EquivalenceMember *member = (EquivalenceMember *)lfirst(lc2);
++			if (IsA(member->em_expr, Var))
++			{
++				Var *var = (Var *)member->em_expr;
++				if (var->varno != subquery_varno && var->varlevelsup == 0)
++				{
++					joined_var = var;
++					eclass = ec;
++					break;
++				}
++			}
++		}
++
++		if (joined_var != NULL)
++			break;
++	}
++
++	if (joined_var == NULL || subquery_var == NULL)
++		return joinlist;
++
++	/* 
++	 * Отношение должно соединяться с другими только по этому атрибуту (одному).
++	 */
++	Assert(joined_var->varno < root->simple_rel_array_size);
++
++	/* 
++	 * Проверяем, что соединение не на результат агрегата
++	 */
++	if (is_agg(root->simple_rte_array[subquery_varno]->subquery, subquery_var))
++		return joinlist;
++
++	/* Создаем условие SUB.VAR = REL.VAR */
++	join_clause = generate_joinclause(eclass, subquery_var, joined_var);
++	if (join_clause == NULL)
++		return joinlist;
++
++	/* Проверяем ключ на уникальность */
++	joined_rel = root->simple_rel_array[joined_var->varno];
++	if (!relation_has_unique_index_for(root, joined_rel, list_make1(join_clause), NIL, NIL))
++		return joinlist;
++
++	/* 
++	 * Теперь мы готовы пробросить этот Join внутрь
++	 */
++	joinlist = pushdown_single_rel(root, joinlist, join_clause, subquery_var, joined_var, subquery,
++							   	   subquery_varno, joined_rel, joined_var->varno);
++
++	/* Удаляем это отношение из родительского запроса */
++	root->all_query_rels = bms_del_member(root->all_query_rels, joined_var->varno);
++	root->all_baserels = bms_del_member(root->all_baserels, joined_var->varno);
++
++	return joinlist;
++}
++
++List* pushdown_joins(PlannerInfo *root, List *joinlist)
++{
++	for (int i = 1; i < root->simple_rel_array_size; ++i)
++	{
++		Query *subquery;
++		RelOptInfo *rel = root->simple_rel_array[i];
++		if (rel == NULL || rel->reloptkind != RELOPT_BASEREL || rel->rtekind != RTE_SUBQUERY)
++			continue;
++
++		subquery = root->simple_rte_array[i]->subquery;
++		
++		Assert(subquery != NULL);
++		
++		joinlist = pushdown_joins_subquery(root, joinlist, rel, i);
++	}
++
++	return joinlist;
++}
+diff --git a/src/backend/optimizer/plan/planmain.c b/src/backend/optimizer/plan/planmain.c
+index 7afd434c601..814f9e62be9 100644
+--- a/src/backend/optimizer/plan/planmain.c
++++ b/src/backend/optimizer/plan/planmain.c
+@@ -30,6 +30,7 @@
+ #include "optimizer/placeholder.h"
+ #include "optimizer/planmain.h"
+ 
++bool enable_subquery_join_pushdown = false;
+ 
+ /*
+  * query_planner
+@@ -215,6 +216,10 @@ query_planner(PlannerInfo *root,
+ 	 */
+ 	fix_placeholder_input_needed_levels(root);
+ 
++
++	if (enable_subquery_join_pushdown)
++		joinlist = pushdown_joins(root, joinlist);
++
+ 	/*
+ 	 * Remove any useless outer joins.  Ideally this would be done during
+ 	 * jointree preprocessing, but the necessary information isn't available
+diff --git a/src/backend/optimizer/plan/subselect.c b/src/backend/optimizer/plan/subselect.c
+index 250ba8edcb8..07a0b8b4fd9 100644
+--- a/src/backend/optimizer/plan/subselect.c
++++ b/src/backend/optimizer/plan/subselect.c
+@@ -17,6 +17,10 @@
+ #include "postgres.h"
+ 
+ #include "access/htup_details.h"
++#include "access/genam.h"
++#include "access/table.h"
++#include "catalog/pg_aggregate.h"
++#include "catalog/pg_constraint.h"
+ #include "catalog/pg_operator.h"
+ #include "catalog/pg_type.h"
+ #include "executor/executor.h"
+@@ -32,11 +36,17 @@
+ #include "optimizer/planner.h"
+ #include "optimizer/prep.h"
+ #include "optimizer/subselect.h"
++#include "parser/parse_clause.h"
+ #include "parser/parse_relation.h"
++#include "parser/parsetree.h"
+ #include "rewrite/rewriteManip.h"
+ #include "utils/builtins.h"
+ #include "utils/lsyscache.h"
+ #include "utils/syscache.h"
++#include "utils/snapmgr.h"
++#include "utils/fmgroids.h"
++#include "utils/rel.h"
++#include "utils/array.h"
+ 
+ 
+ typedef struct convert_testexpr_context
+@@ -1843,6 +1853,438 @@ convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
+ 	return subselect;
+ }
+ 
++static Node *
++find_correlation_opexprs_walker(Node *expr, void *context)
++{
++	if (expr == NULL)
++		return false;
++
++	switch (nodeTag(expr))
++	{
++		case T_BoolExpr:
++			{
++				BoolExpr *boolExpr = (BoolExpr *)expr;
++				if (boolExpr->boolop == AND_EXPR)
++				{
++					ListCell *lc;
++					foreach(lc, boolExpr->args)
++					{
++						/* Рекурсивно обходим все части AND условия */
++						Node *result = find_correlation_opexprs_walker((Node *)lfirst(lc), context);
++						if (result == NULL)
++							return NULL;
++						
++						/* 
++						 * При обходе, мы можем удалить OpExpr из списка, если
++						 * он подошел по фильтру.
++						 * Тогда нам возвращается заменитель - его нужно
++						 * вставить в список заместо старого условия.
++						 */
++						lfirst(lc) = result;
++					}
++					return expr;
++				}
++			}
++			break;
++		case T_OpExpr:
++			{
++				OpExpr *op = (OpExpr *)expr;
++				if (list_length(op->args) == 2 &&
++					IsA(get_leftop(op), Var) &&
++					IsA(get_rightop(op), Var))
++				{
++					/* 
++					 * OUTER.VAR = INNER.VAR или INNER.VAR = OUTER.VAR
++					 */
++					Var *left = (Var *) get_leftop(op);
++					Var *right = (Var *) get_rightop(op);
++					if ((left->varlevelsup == 1 || right->varlevelsup == 1) &&
++						get_oprrest(op->opno) == F_EQSEL)
++					{
++						List **ops = (List **)context;
++						*ops = lappend(*ops, op);
++						return makeBoolConst(true, false);
++					}
++				}
++			}
++			break;
++		default:
++			break;
++	}
++
++	/* 
++	 * Если есть какие-то другие условия, то проверяем, что в них
++	 * не используются родительские атрибуты
++	 */
++	if (contain_vars_of_level(expr, 1))
++	{
++		return NULL;
++	}
++	
++	return expr;
++}
++
++static bool
++get_correlated_eq_ops(Node **whereClause, List **out_op_exprs)
++{
++	List *op_exprs = NIL;
++	Node *result;
++
++	/* 
++	 * Здесь мы находим все вызовы операторов в форме INNER = OUTER.
++	 * Мы делаем это следующим образом. Рекурсивно запускаем функцию обхода.
++	 * 
++	 * 1. Если находим условие AND, то рекурсивно обрабатываем каждую из частей.
++	 * 2. Когда находим OpExpr, то проверяем, что он соответствует форме выше (тогда добавляем его) в список.
++	 * 3. В противном случае, проверяем, что в полученном условии не используются атрибуты родительского запроса.
++	 * 
++	 * Т.е. мы можем найти INNER = OUTER только среди AND условий, а в остальных
++	 * выражениях не должны использоваться родительские атрибуты.
++	 */
++	
++	if ((result = find_correlation_opexprs_walker(*whereClause, (void *)&op_exprs)) == NULL)
++		return false;
++	*out_op_exprs = op_exprs;
++	*whereClause = result;
++	return op_exprs != NIL;
++}
++
++static void
++add_qual_to_jointree(FromExpr *from, Node *qual)
++{
++	/* 
++	 * Когда мы добавляем условие к существующему, то можем обернуть оба в BoolExpr AND,
++	 * но будет лучше избавиться от дополнительного уровня и добавить к существующему
++	 * списку, чем создавать новый.
++	 */
++	if (from->quals == NULL)
++	{
++		from->quals = qual;
++		return;
++	}
++	
++	if (IsA(from->quals, BoolExpr) && ((BoolExpr *)from->quals)->boolop == AND_EXPR)
++	{
++		BoolExpr *boolExpr = (BoolExpr *)from->quals;
++		boolExpr->args = lappend(boolExpr->args, qual);
++		return;
++	}
++
++	from->quals = (Node *) makeBoolExpr(AND_EXPR, list_make2(from->quals, qual), -1);
++}
++
++static String *get_colname(Query *query, Var *var)
++{
++	/* Вспомогательная функция, для получения названия атрибута для подзапроса */
++	RangeTblEntry *rte = rt_fetch(var->varno, query->rtable);
++
++	if (rte->alias != NULL && var->varattno <= list_length(rte->alias->colnames))	
++		return makeString(pstrdup(strVal(list_nth(rte->alias->colnames, var->varattno - 1))));
++
++	if (var->varattno <= list_length(rte->eref->colnames))
++		return makeString(pstrdup(strVal(list_nth(rte->eref->colnames, var->varattno - 1))));
++	
++	return makeString(pstrdup("?column?"));
++}
++
++static bool has_aggs_walker(Node *node, void *arg)
++{
++	/* Находим Aggref - агрегирующую функцию */
++	if (IsA(node, Aggref))
++		return true;
++
++	return expression_tree_walker(node, &has_aggs_walker, arg);
++}
++
++
++static bool returns_single_agg(Query *parse)
++{
++	return parse->groupClause == NIL &&
++		   list_length(parse->targetList) == 1 &&
++		   has_aggs_walker(linitial(parse->targetList), NULL);
++}
++
++static bool get_finalfunc_and_initval(Oid aggno, Oid *aggfinalfunc, text **agginitval, Oid *deserialfunc)
++{
++	Form_pg_aggregate form;
++	SysScanDesc sscan;
++	Relation rel;
++	HeapTuple tup;
++	ScanKeyData key;
++	bool initvalisnull;
++	Datum initval;
++
++	/* Открываем pg_aggregate */
++	tup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggno));
++
++	if (!HeapTupleIsValid(tup))
++		return false;
++
++	form = (Form_pg_aggregate)GETSTRUCT(tup);
++
++	/* initval хранится как text, поэтому через структуру не получить */
++	initval = SysCacheGetAttr(AGGFNOID, tup, Anum_pg_aggregate_agginitval, &initvalisnull);
++	
++	*aggfinalfunc = form->aggfinalfn;
++	*deserialfunc = form->aggdeserialfn;
++	if (initvalisnull)
++		*agginitval = NULL;
++	else
++		*agginitval = DatumGetTextPCopy(initval);
++
++	ReleaseSysCache(tup);
++
++	if (*aggfinalfunc == InvalidOid || *deserialfunc == InvalidOid)
++		return false;
++	
++	return true;
++}
++
++static bool agg_returns_null_on_empty_walker(Node *node, void *arg)
++{
++	if (IsA(node, Aggref))
++	{
++		LOCAL_FCINFO(fcinfo, 2);
++		FmgrInfo flinfo;
++		Oid aggfinalfunc;
++		Oid deserialfunc;
++		Datum initval;
++		text *agginitval;
++		Aggref *agg = (Aggref *)node;
++
++		/* Получаем aggfinalfn, agginitval, aggdeserialfn из pg_aggregate */
++		if (!get_finalfunc_and_initval(agg->aggfnoid, &aggfinalfunc, 
++									   &agginitval, &deserialfunc))
++			return true;
++		
++		/* Десериализуем initval во внутреннее состояние */
++		if (agginitval != NULL)
++		{
++			fmgr_info(deserialfunc, &flinfo);
++			InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
++			fcinfo->args[0].value = PointerGetDatum(agginitval);
++			 
++			fcinfo->args[1].value = (Datum) 0;
++			fcinfo->args[1].isnull = true;
++			
++			initval = FunctionCallInvoke(fcinfo);
++		}
++		else
++		{
++			initval = (Datum) 0;
++		}
++		
++		/* Вызываем финализатор */
++		fmgr_info(aggfinalfunc, &flinfo);
++		InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
++		fcinfo->args[0].value = initval;
++		fcinfo->args[0].isnull = agginitval == NULL;
++
++		/* Проверяем, что агрегат возвращает NULL */
++		FunctionCallInvoke(fcinfo);
++		return !fcinfo->isnull;
++	}
++
++	return expression_tree_walker(node, &agg_returns_null_on_empty_walker, arg);
++}
++
++static bool agg_returns_null_on_empty(Query *parse)
++{
++	TargetEntry *te = linitial(parse->targetList);
++
++	if (agg_returns_null_on_empty_walker((Node *)te->expr, NULL))
++		return false;
++	else
++		return true;
++}
++
++JoinExpr *
++convert_correlated_sublink_to_join(Query *parent, SubLink *sublink, Relids avaiable_relids)
++{
++	ParseNamespaceItem *nsitem;
++	JoinExpr *join;
++	Node *whereClause;
++	BoolExpr *joinClause;
++	RangeTblRef *rtr;
++	ListCell *lc;
++	int rtindex;
++	int varno;
++	List *eq_ops;
++	Query *parse = (Query *) sublink->subselect;
++	List *colnames;
++
++	/* Мы должны возвращать 1 элемент, который получаем с помощью агрегирования */
++	if (!(sublink->subLinkType == EXPR_SUBLINK && 
++		  parse->hasAggs && 
++		  list_length(parse->targetList) == 1))
++		return NULL;
++	
++	/* 
++	 * Запрос должен быть максимально простым
++	 */
++	if (parse->commandType != CMD_SELECT ||
++		parse->setOperations ||
++		parse->groupingSets ||
++		parse->hasWindowFuncs ||
++		parse->hasTargetSRFs ||
++		parse->hasModifyingCTE ||
++		parse->havingQual ||
++		parse->limitOffset ||
++		parse->rowMarks ||
++		parse->cteList)
++		return NULL;
++
++	/* 
++	 * Создаем копию дерева подзапроса, которую можем безопасно изменять
++	 */
++	parse = copyObject(parse);
++
++	/* 
++	 * Удаляем условия фильтрации из подзапроса, чтобы
++	 * удобнее проверять использованные атрибуты
++	 */
++	whereClause = parse->jointree->quals;
++	parse->jointree->quals = NULL;
++
++	/* 
++	 * Использовать атрибуты родителя мы можем только внутри верхнеуровневого WHERE
++	 */
++	if (contain_vars_of_level((Node *)parse, 1) || 
++	    !contain_vars_of_level(whereClause, 1))
++		return NULL;
++
++	/* 
++	 * VOLATILE функции могут вернуть разный ответ на одних и тех же данных.
++	 */
++	if (contain_volatile_functions(whereClause) || 
++		contain_volatile_functions((Node *)parse))
++		return NULL;
++
++	/* 
++	 * Проверяем, что подзапрос возвращает единственный агрегат
++	 */
++	if (!returns_single_agg(parse))
++		return NULL;
++
++	/* Проверяем, что агрегат возвращает NULL на пустом входе */
++	if (!agg_returns_null_on_empty(parse))
++		return NULL;
++	
++	/* 
++	 * Получаем список условий INNER = OUTER из списка WHERE подзапроса.
++	 * Одновременно с этим удаляем.
++	 */
++	if (!get_correlated_eq_ops(&whereClause, &eq_ops))
++		return NULL;
++	
++	/* Возвращаем условия фильтров, относящиеся только к подзапросу */
++	parse->jointree->quals = whereClause;
++	
++	/* Индекс RTE, который будет у нашего подзапроса в родительском запросе */
++	rtindex = list_length(parent->rtable) + 1;
++
++	/* Создаем BoolExpr для AND'ов равенств  */
++	joinClause = (BoolExpr *) makeBoolExpr(AND_EXPR, NIL, -1);
++
++	colnames = list_make1(makeString(pstrdup("result")));
++
++	/* Обходим все INNER = OUTER */
++	foreach(lc, eq_ops)
++	{
++		OpExpr *opExpr = (OpExpr *)lfirst(lc);
++		OpExpr *joinClauseExpr;
++		Var *inner;
++		Var *outer;
++		bool inner_right;
++		TargetEntry *targetEntry;
++		SortGroupClause *sgClause;
++		Var *inner_var;
++		Var *outer_var;
++
++		Assert(list_length(opExpr->args) == 2 &&
++				IsA(get_leftop(opExpr), Var) &&
++				IsA(get_rightop(opExpr), Var));
++
++		/* Определяем INNER и OUTER части равенства */
++		inner = (Var *)get_rightop(opExpr);
++		outer = (Var *)get_leftop(opExpr);
++		inner_right = true;
++		
++		if (inner->varlevelsup == 1)
++		{
++			inner = (Var *) get_leftop(opExpr);
++			outer = (Var *) get_rightop(opExpr);
++			inner_right = false;
++		}
++
++		/* Добавляем атрибут в список SELECT */
++		targetEntry = makeTargetEntry((Expr *)inner,
++									   list_length(parse->targetList) + 1, 
++									   pstrdup("") /* Заполнитель названия атрибута */,
++									   false);
++		parse->targetList = lappend(parse->targetList, targetEntry);
++
++		/* Создаем GROUP BY для этого атрибута */
++		sgClause = makeNode(SortGroupClause);
++		sgClause->eqop = opExpr->opno;
++		sgClause->hashable = true;
++		sgClause->tleSortGroupRef = assignSortGroupRef(targetEntry, parse->targetList);
++		parse->groupClause = lappend(parse->groupClause, sgClause);
++
++		/* Создаем условие JOIN: SUB.INNER = OUTER */
++
++		/* Делаем копию текущего INNER, т.к. это уже другой атрибут */
++		inner_var = makeVarFromTargetEntry(inner->varno, targetEntry);
++		if (inner_right)
++			llast(opExpr->args) = inner_var;
++		else
++			linitial(opExpr->args) = inner_var;
++
++		/* 
++		 * Теперь, наш INNER атрибут будет использоваться в родительском запросе,
++		 * поэтому брать его надо уже из другого отношения
++		 */
++		inner_var->varno = rtindex;
++
++		/* Переносим родительский атрибут обратно */
++		outer_var = copyObject(outer);
++		outer_var->varlevelsup = 0;
++
++		/* Добавляем условие SUB.INNER = OUTER в список условий JOIN */
++		joinClauseExpr = (OpExpr *) make_opclause(opExpr->opno, opExpr->opresulttype, opExpr->opretset,
++			(Expr *) inner_var, (Expr *) outer_var, opExpr->opcollid, opExpr->inputcollid);
++		joinClause->args = lappend(joinClause->args, joinClauseExpr);
++
++		/* Подбираем название столбца */
++		colnames = lappend(colnames, get_colname(parse, inner));
++	}
++
++	/* Создаем RTE для подзапроса */
++	nsitem = addRangeTableEntryForSubquery(make_parsestate(NULL), 
++										   parse,
++										   makeAlias("CORRELATED_subquery", colnames),
++										   false, false);
++	/* Добавляем RTE в родительский запрос */
++	parent->rtable = lappend(parent->rtable, nsitem->p_rte);
++
++
++	/* Создаем JOIN узел подзапроса с оставшимся запросом */
++	rtr = makeNode(RangeTblRef);
++	rtr->rtindex = rtindex;
++
++	join = makeNode(JoinExpr);
++	join->jointype = JOIN_INNER;
++	join->isNatural = false;
++	join->larg = NULL;
++	join->rarg = (Node *)rtr;
++	join->usingClause = NIL;
++	join->join_using_alias = NULL;
++	join->quals = (Node *)joinClause;
++	join->alias = NULL;
++	join->rtindex = 0;
++	
++	return join;
++}
+ 
+ /*
+  * Replace correlation vars (uplevel vars) with Params.
+diff --git a/src/backend/optimizer/prep/prepjointree.c b/src/backend/optimizer/prep/prepjointree.c
+index 4e2a789b86f..31a5291badd 100644
+--- a/src/backend/optimizer/prep/prepjointree.c
++++ b/src/backend/optimizer/prep/prepjointree.c
+@@ -277,6 +277,8 @@ replace_empty_jointree(Query *parse)
+ 	parse->jointree->fromlist = list_make1(rtr);
+ }
+ 
++bool enable_subquery_decorrelation = false;
++
+ /*
+  * pull_up_sublinks
+  *		Attempt to pull up ANY and EXISTS SubLinks to be treated as
+@@ -614,6 +616,111 @@ pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
+ 		/* Else return it unmodified */
+ 		return node;
+ 	}
++
++	if (enable_subquery_decorrelation && is_opclause(node))
++	{
++		OpExpr *op = (OpExpr *)node;
++		JoinExpr *j;
++		Relids child_rels;
++		TargetEntry *result;
++		SubLink *sublink;
++		bool on_left;
++		
++		/* Находим вызов оператора в форме: EXPR OP (...) */
++		if (list_length(op->args) != 2)
++			return node;
++
++		if (IsA(linitial(op->args), SubLink))
++		{
++			sublink = (SubLink *)linitial(op->args);
++			on_left = true;
++		}
++		else if (IsA(llast(op->args), SubLink))
++		{
++			sublink = (SubLink *) llast(op->args);
++			on_left = false;
++		}
++		else
++		{
++			/* В этом операторе не используется подзапрос */
++			return node;
++		}
++
++		/* Подзапрос возвращает скалярное выражение */
++		if (sublink->subLinkType != EXPR_SUBLINK)
++		{
++			/* Подзапрос не возвращает скалярное выражение */
++			return node;
++		}
++
++		if ((j = convert_correlated_sublink_to_join(root->parse, sublink, available_rels1)) != NULL)
++		{
++			Query *subquery = (Query *)sublink->subselect;
++			Var *var;
++			int rtindex;
++
++			Assert(IsA(subquery, Query));
++	
++			/* 
++			 * Если мы успешно превратили подзапрос в JOIN, то заменяем
++			 * подзапрос в выражении на атрибут этого отношения после JOIN.
++			 * Мы знаем, что это значение будет первым в списке возвращаемых
++			 * атрибутов (targetList).
++			 */
++			rtindex = list_length(root->parse->rtable);
++			result = (TargetEntry *) linitial(subquery->targetList);
++			var = makeVarFromTargetEntry(rtindex, result);
++			if (on_left)
++				linitial(op->args) = var;
++			else
++				llast(op->args) = var;
++	
++			j->quals = (Node *)makeBoolExpr(AND_EXPR, list_make2(op, j->quals), -1);
++			j->larg = *jtlink1;
++			*jtlink1 = (Node *)j;
++
++			j->rarg = pull_up_sublinks_jointree_recurse(root, j->rarg, &child_rels);
++			j->quals = pull_up_sublinks_qual_recurse(root, j->quals, &j->rarg,
++													 child_rels, NULL, NULL);
++			return NULL;
++		}
++
++		if (available_rels2 != NULL &&
++			(j = convert_correlated_sublink_to_join(root->parse, sublink, available_rels2)) != NULL)
++		{
++			Query *subquery = (Query *)sublink->subselect;
++			Var *var;
++			int rtindex;
++
++			Assert(IsA(subquery, Query));
++	
++			/* 
++			 * Если мы успешно превратили подзапрос в JOIN, то заменяем
++			 * подзапрос в выражении на атрибут этого отношения после JOIN.
++			 * Мы знаем, что это значение будет первым в списке возвращаемых
++			 * атрибутов (targetList).
++			 */
++			rtindex = list_length(root->parse->rtable);
++			result = (TargetEntry *) linitial(subquery->targetList);
++			var = makeVarFromTargetEntry(rtindex, result);
++			if (on_left)
++				linitial(op->args) = var;
++			else
++				llast(op->args) = var;
++	
++			j->quals = (Node *)makeBoolExpr(AND_EXPR, list_make2(op, j->quals), -1);
++			j->larg = *jtlink2;
++			*jtlink2 = (Node *)j;
++
++			j->rarg = pull_up_sublinks_jointree_recurse(root, j->rarg, &child_rels);
++			j->quals = pull_up_sublinks_qual_recurse(root, j->quals, &j->rarg,
++													 child_rels, NULL, NULL);
++			return NULL;
++		}
++
++		return node;
++	}
++	
+ 	if (is_notclause(node))
+ 	{
+ 		/* If the immediate argument of NOT is EXISTS, try to convert */
+diff --git a/src/backend/utils/misc/guc_tables.c b/src/backend/utils/misc/guc_tables.c
+index ab97dea63c4..0bd96263a4e 100644
+--- a/src/backend/utils/misc/guc_tables.c
++++ b/src/backend/utils/misc/guc_tables.c
+@@ -52,6 +52,7 @@
+ #include "optimizer/optimizer.h"
+ #include "optimizer/paths.h"
+ #include "optimizer/planmain.h"
++#include "optimizer/prep.h"
+ #include "parser/parse_expr.h"
+ #include "parser/parser.h"
+ #include "pgstat.h"
+@@ -1998,6 +1999,24 @@ struct config_bool ConfigureNamesBool[] =
+ 		NULL, NULL, NULL
+ 	},
+ 
++	{
++		{"enable_subquery_decorrelation", PGC_SUSET, QUERY_TUNING_OTHER,
++			gettext_noop("Enable subquery decorrelation optimization")
++		},
++		&enable_subquery_decorrelation,
++		false,
++		NULL, NULL, NULL
++	},
++
++	{
++		{"enable_subquery_join_pushdown", PGC_SUSET, QUERY_TUNING_OTHER,
++			gettext_noop("Enable join pushdown optimization for decorrelated subqueries")
++		},
++		&enable_subquery_join_pushdown,
++		false,
++		NULL, NULL, NULL
++	},
++
+ 	/* End-of-list marker */
+ 	{
+ 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
+diff --git a/src/include/optimizer/planmain.h b/src/include/optimizer/planmain.h
+index 31c188176b7..41f6aba8d0e 100644
+--- a/src/include/optimizer/planmain.h
++++ b/src/include/optimizer/planmain.h
+@@ -97,6 +97,8 @@ extern void match_foreign_keys_to_quals(PlannerInfo *root);
+ /*
+  * prototypes for plan/analyzejoins.c
+  */
++extern PGDLLIMPORT bool enable_subquery_join_pushdown;
++
+ extern List *remove_useless_joins(PlannerInfo *root, List *joinlist);
+ extern void reduce_unique_semijoins(PlannerInfo *root);
+ extern bool query_supports_distinctness(Query *query);
+@@ -104,7 +106,8 @@ extern bool query_is_distinct_for(Query *query, List *colnos, List *opids);
+ extern bool innerrel_is_unique(PlannerInfo *root,
+ 							   Relids joinrelids, Relids outerrelids, RelOptInfo *innerrel,
+ 							   JoinType jointype, List *restrictlist, bool force_cache);
+-
++extern List *pushdown_joins(PlannerInfo *root, List *joinlist);
++							   
+ /*
+  * prototypes for plan/setrefs.c
+  */
+diff --git a/src/include/optimizer/prep.h b/src/include/optimizer/prep.h
+index 54fd61c9c3e..ec7cb567658 100644
+--- a/src/include/optimizer/prep.h
++++ b/src/include/optimizer/prep.h
+@@ -33,6 +33,8 @@ extern Relids get_relids_in_jointree(Node *jtnode, bool include_outer_joins,
+ 									 bool include_inner_joins);
+ extern Relids get_relids_for_join(Query *query, int joinrelid);
+ 
++extern PGDLLIMPORT bool enable_subquery_decorrelation;
++
+ /*
+  * prototypes for preptlist.c
+  */
+diff --git a/src/include/optimizer/subselect.h b/src/include/optimizer/subselect.h
+index c03ffc56bf6..915b9a9115f 100644
+--- a/src/include/optimizer/subselect.h
++++ b/src/include/optimizer/subselect.h
+@@ -24,6 +24,11 @@ extern JoinExpr *convert_EXISTS_sublink_to_join(PlannerInfo *root,
+ 												SubLink *sublink,
+ 												bool under_not,
+ 												Relids available_rels);
++extern JoinExpr *convert_correlated_sublink_to_join(Query *parent, 
++													SubLink *sublink,
++													Relids available_relids);
++extern void pushdown_subquery_joins(Query *parse, RangeTblEntry *subquery_rte,
++									int subquery_rti);
+ extern Node *SS_replace_correlation_vars(PlannerInfo *root, Node *expr);
+ extern Node *SS_process_sublinks(PlannerInfo *root, Node *expr, bool isQual);
+ extern void SS_identify_outer_params(PlannerInfo *root);
